@@ -1,0 +1,30 @@
+# Build / binary / local artifacts
+dist/*.exe
+dist/*.zip
+dist/*.dll
+dist/WebView2-LICENSE.txt
+dist/SHA256SUMS.txt
+build_win/
+__pycache__/
+*.py[cod]
+*$py.class
+*.exe
+*.obj
+*.pdb
+
+# User save files & backups (NEVER commit personal saves!)
+*.save
+*.autosave
+*.bak
+*.tmp
+
+# Session handoff notes (local continuity only)
+HANDOFF.md
+HANDOFF-AGY.md
+HANDOFF-*.md
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
