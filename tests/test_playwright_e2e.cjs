@@ -22,7 +22,7 @@ function resolvePlaywright() {
 
 const { chromium } = resolvePlaywright();
 const ROOT = path.resolve(__dirname, '..');
-const DIST_HTML = path.join(ROOT, 'dist', 'NextJianghu2SaveEditor-v1.0.html');
+const DIST_HTML = path.join(ROOT, 'dist', 'NextJianghu2SaveEditor-v1.0.1.html');
 const HANZI_OR_KANA_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff]/g;
 
 async function runModeA(browser) {

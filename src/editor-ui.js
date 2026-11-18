@@ -1333,7 +1333,7 @@
     if (exp) exp.addEventListener('click', () => {
       try {
         const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
-        downloadBytes('NextJianghu2SaveEditor-v1.0.html', new TextEncoder().encode(html), 'text/html;charset=utf-8');
+        downloadBytes('NextJianghu2SaveEditor-v1.0.1.html', new TextEncoder().encode(html), 'text/html;charset=utf-8');
         showToast('현재 에디터 HTML을 내보냈습니다.', 'ok');
       } catch (err) {
         showToast('HTML 내보내기 실패: ' + (err && err.message ? err.message : String(err)), 'error');

@@ -68,7 +68,7 @@ PRESET_DESCRIPTIONS = {
 }
 
 HTML_CANDIDATES = (
-    Path("dist") / "NextJianghu2SaveEditor-v1.0.html",
+    Path("dist") / "NextJianghu2SaveEditor-v1.0.1.html",
     Path("src") / "editor-page.html",
 )
 

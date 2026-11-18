@@ -17,7 +17,7 @@ namespace NextJianghu2SaveEditor
 {
     internal static class Program
     {
-        public const string AppTitle = "\ud558\uc77c\ucc38\uac15\ud6382 \uc138\uc774\ube0c \uc5d0\ub514\ud130 v1.0";
+        public const string AppTitle = "\ud558\uc77c\ucc38\uac15\ud6382 \uc138\uc774\ube0c \uc5d0\ub514\ud130 v1.0.1";
         public const string VirtualHost = "nj2-editor.local";
 
         private const string HtmlResourceName = "NextJianghu2SaveEditor.html";
@@ -40,8 +40,8 @@ namespace NextJianghu2SaveEditor
                 _localAppDataBase = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "NextJianghu2SaveEditor");
-                _runtimeDir = Path.Combine(_localAppDataBase, "runtime-1.0.0");
-                _htmlDir = Path.Combine(_localAppDataBase, "html-1.0.0");
+                _runtimeDir = Path.Combine(_localAppDataBase, "runtime-1.0.1");
+                _htmlDir = Path.Combine(_localAppDataBase, "html-1.0.1");
                 _htmlFilePath = Path.Combine(_htmlDir, HtmlResourceName);
 
                 HookAssemblyResolver();
