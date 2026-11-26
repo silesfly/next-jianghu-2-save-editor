@@ -22,7 +22,7 @@ function resolvePlaywright() {
 
 const { chromium } = resolvePlaywright();
 const ROOT = path.resolve(__dirname, '..');
-const DIST_HTML = path.join(ROOT, 'dist', 'NextJianghu2SaveEditor-v1.0.2.html');
+const DIST_HTML = path.join(ROOT, 'dist', 'NextJianghu2SaveEditor-v1.0.3.html');
 const HANZI_OR_KANA_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff]/g;
 
 async function runModeA(browser) {
@@ -155,9 +155,10 @@ async function runModeB(browser) {
       return badge && badge.textContent && badge.textContent.includes('저장됨');
     }, { timeout: 10000 });
 
-    const updated = JSON.parse(fs.readFileSync(savePath, 'utf8'));
+    const updated = JSON.parse(fs.readFileSync(savePath, 'utf8').replace(/^\uFEFF/, ''));
     const player = Object.values(updated.playerentity)[0];
-    assert.strictEqual(player.m_valueBase['68'], 10000000);
+    assert.strictEqual(typeof player.m_valueBase, 'string');
+    assert.strictEqual(JSON.parse(player.m_valueBase)['68'], 10000000);
 
     const backups = fs.readdirSync(tmpDir).filter((f) => f.startsWith('savefile0.json.backup-') && f.endsWith('.bak'));
     assert.ok(backups.length > 0, 'Backup file should exist');

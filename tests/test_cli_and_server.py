@@ -134,9 +134,10 @@ class TestCliWorkflow(unittest.TestCase):
         backup_p = Path(edit_res["backupPath"])
         self.assertTrue(backup_p.is_file())
         self.assertEqual(backup_p.read_bytes(), orig_bytes)
-        updated_doc = json.loads(save_p.read_text(encoding="utf-8"))
+        updated_doc = json.loads(save_p.read_text(encoding="utf-8-sig"))
         player = next(iter(updated_doc["playerentity"].values()))
-        self.assertEqual(player["m_valueBase"]["68"], 888888)
+        self.assertIsInstance(player["m_valueBase"], str)
+        self.assertEqual(json.loads(player["m_valueBase"])["68"], 888888)
         self.assertEqual(player["jingjieGangLevel"], 12)
 
         # Simulated game running blocks write
@@ -168,6 +169,47 @@ class TestCliWorkflow(unittest.TestCase):
         # Slot 13 in demo omits key "2" (real qty-1 format) and still validates
         self.assertNotIn("2", content["13"])
         self.assertEqual(E.validate_doc(doc), [])
+
+    def test_real_bom_stringified_save_cli_roundtrip(self):
+        save_p = self.dir / "savefile1.json"
+        payload = {
+            "playerentity": {
+                "1": {
+                    "m_valueBase": json.dumps({"0": 4500, "68": 50000, "999": 42}, separators=(",", ":")),
+                    "m_learntSpell": json.dumps({"0": [3, 4], "1": [500]}, separators=(",", ":")),
+                    "m_EquipedStuntIds": json.dumps({"34": 3400}, separators=(",", ":")),
+                    "qgactive": json.dumps({"101": 1010}, separators=(",", ":")),
+                    "m0": json.dumps([10000, 10010], separators=(",", ":")),
+                    "itemStorage": {"count": 120, "content": {"12": {"0": 1, "1": 1001, "4": 1.0}}},
+                }
+            },
+            "Entitys": {"2": {"guid": 2, "m_DaTiTime": 0.0, "m_valueBase": json.dumps({"0": 2000}, separators=(",", ":"))}},
+        }
+        bom = b"\xef\xbb\xbf"
+        save_p.write_bytes(bom + json.dumps(payload, indent=4, ensure_ascii=False).encode("utf-8"))
+
+        p_val = run_cli("validate", str(save_p))
+        self.assertEqual(p_val.returncode, 0, p_val.stderr + p_val.stdout)
+        self.assertTrue(json.loads(p_val.stdout)["ok"])
+
+        p_insp = run_cli("inspect", str(save_p), "--json")
+        self.assertEqual(p_insp.returncode, 0, p_insp.stderr + p_insp.stdout)
+        self.assertEqual(json.loads(p_insp.stdout)["summary"]["money"], 50000)
+
+        p_edit = run_cli("edit", str(save_p), "--money", "777777")
+        self.assertEqual(p_edit.returncode, 0, p_edit.stderr + p_edit.stdout)
+
+        raw = save_p.read_bytes()
+        self.assertTrue(raw.startswith(bom))
+        text = raw.decode("utf-8-sig")
+        parsed = json.loads(text)
+        p = parsed["playerentity"]["1"]
+        self.assertIsInstance(p["m_valueBase"], str)
+        vb = json.loads(p["m_valueBase"])
+        self.assertEqual(vb["68"], 777777)
+        self.assertEqual(vb["999"], 42)
+        self.assertRegex(text, r'"m_DaTiTime"\s*:\s*0\.0')
+        self.assertRegex(text, r'"4"\s*:\s*1\.0')
 
 
 class TestLoopbackServer(unittest.TestCase):
@@ -249,8 +291,11 @@ class TestLoopbackServer(unittest.TestCase):
         self.assertEqual(st_load, 200)
         loaded = json.loads(raw_load.decode("utf-8"))
 
-        doc = json.loads(base64.b64decode(loaded["jsonBase64"]).decode("utf-8"))
-        next(iter(doc["playerentity"].values()))["m_valueBase"]["68"] = 7654321
+        doc = json.loads(base64.b64decode(loaded["jsonBase64"]).decode("utf-8-sig"))
+        player = next(iter(doc["playerentity"].values()))
+        vb = json.loads(player["m_valueBase"]) if isinstance(player["m_valueBase"], str) else dict(player["m_valueBase"])
+        vb["68"] = 7654321
+        player["m_valueBase"] = json.dumps(vb, separators=(",", ":"))
         new_b64 = base64.b64encode(json.dumps(doc).encode("utf-8")).decode("ascii")
 
         save_body = json.dumps({
@@ -267,6 +312,106 @@ class TestLoopbackServer(unittest.TestCase):
         # Repeat save with stale sha256 -> 409
         st_conflict, _ = self._req("POST", "/api/save", body=save_body, headers={"X-NJ2-Token": token, "Content-Type": "application/json"})
         self.assertEqual(st_conflict, 409)
+
+
+class TestReviewRegressions(unittest.TestCase):
+    def test_validate_rejects_raw_wpj_and_edit_repairs_and_enforces_int32(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "corrupted.json"
+            raw_doc = {
+                "playerentity": {
+                    "1": {
+                        "m_valueBase": {"68": 100},
+                        "mijiIdList": [10000],
+                        "m_learntSpell": {"0": [5]},
+                        "itemStorage": {
+                            "count": 20,
+                            "content": {"12": {"0": 1001, "1": 1001, "4": 1, "9": 10, "10": 1}},
+                        },
+                    }
+                },
+                "Entitys": {
+                    "2": {
+                        "m_valueBase": {"68": 50},
+                        "m_DaTiTime": 0,
+                    }
+                },
+            }
+            p.write_text(json.dumps(raw_doc, indent=2), encoding="utf-8")
+
+            # validate must reject raw non-string WritePropertyJson fields
+            res_val = run_cli("validate", str(p))
+            self.assertNotEqual(res_val.returncode, 0)
+
+            # edit with int32 overflow must fail
+            res_over = run_cli("edit", str(p), "--money", "3000000000", "--out", str(Path(td) / "over.json"))
+            self.assertNotEqual(res_over.returncode, 0)
+
+            # edit repairs player + Entitys WritePropertyJson strings and known double floats
+            out_p = Path(td) / "repaired.json"
+            res_edit = run_cli("edit", str(p), "--money", "777", "--out", str(out_p))
+            self.assertEqual(res_edit.returncode, 0, msg=res_edit.stderr)
+            txt = out_p.read_text(encoding="utf-8")
+            repaired = json.loads(txt)
+            self.assertIsInstance(repaired["playerentity"]["1"]["m_valueBase"], str)
+            self.assertIsInstance(repaired["playerentity"]["1"]["mijiIdList"], str)
+            self.assertIsInstance(repaired["Entitys"]["2"]["m_valueBase"], str)
+            self.assertIn('"m_DaTiTime": 0.0', txt)
+            self.assertIn('"4": 1.0', txt)
+
+            # repaired save now passes strict validate
+            res_val2 = run_cli("validate", str(out_p))
+            self.assertEqual(res_val2.returncode, 0, msg=res_val2.stdout + res_val2.stderr)
+
+            # Strict validate individually rejects root raw array, NPC raw dict, and int m_DaTiTime / item["4"]
+            base_ok = {
+                "playerentity": {
+                    "1": {
+                        "m_valueBase": '{"68":100}',
+                        "itemStorage": {"count": 20, "content": {"12": {"0": 1001, "1": 1001, "4": 1.0, "9": 10, "10": 1}}},
+                    }
+                },
+                "Entitys": {"2": {"m_valueBase": '{"68":50}', "m_DaTiTime": 0.0}},
+            }
+            for tag, mutator in (
+                ("root_raw", lambda d: d.__setitem__("allentityids", [1, 2])),
+                ("root_npc_dic_list", lambda d: d.__setitem__("npcGuidProidDic", "[]")),
+                ("npc_raw", lambda d: d["Entitys"]["2"].__setitem__("m_learntSpell", {"0": [1]})),
+                ("npc_spell_scalar", lambda d: d["Entitys"]["2"].__setitem__("m_learntSpell", '{"0":42}')),
+                ("npc_int_dt", lambda d: d["Entitys"]["2"].__setitem__("m_DaTiTime", 0)),
+                ("item_int_4", lambda d: d["playerentity"]["1"]["itemStorage"]["content"]["12"].__setitem__("4", 1)),
+            ):
+                bad = json.loads(json.dumps(base_ok))
+                mutator(bad)
+                bp = Path(td) / f"{tag}.json"
+                bp.write_text(json.dumps(bad), encoding="utf-8")
+                rv = run_cli("validate", str(bp))
+                self.assertNotEqual(rv.returncode, 0, msg=f"{tag} should fail strict validate")
+
+            # Legacy v1.0.2 arrays in dict fields (m_learntSpell/m_EquipedStuntIds/qgactive/m9) repair via CLI edit
+            legacy_arr = {
+                "playerentity": {
+                    "1": {
+                        "m_valueBase": {"68": 100},
+                        "m_learntSpell": [3, 4],
+                        "m_EquipedStuntIds": [3401],
+                        "qgactive": [1010],
+                        "m9": [],
+                    }
+                }
+            }
+            lp = Path(td) / "legacy_arr.json"
+            lp.write_text(json.dumps(legacy_arr), encoding="utf-8")
+            lp_out = Path(td) / "legacy_arr_repaired.json"
+            re_res = run_cli("edit", str(lp), "--money", "555", "--out", str(lp_out))
+            self.assertEqual(re_res.returncode, 0, msg=re_res.stderr)
+            rep_doc = json.loads(lp_out.read_text(encoding="utf-8"))
+            p1 = rep_doc["playerentity"]["1"]
+            self.assertEqual(json.loads(p1["m_learntSpell"]), {"0": [3, 4]})
+            self.assertEqual(json.loads(p1["m_EquipedStuntIds"]), {"34": 3401})
+            self.assertEqual(json.loads(p1["qgactive"]), {"101": 1010})
+            self.assertEqual(json.loads(p1["m9"]), [])
+            self.assertEqual(run_cli("validate", str(lp_out)).returncode, 0)
 
 
 class TestNoLiteralHanziKana(unittest.TestCase):

@@ -68,7 +68,7 @@ PRESET_DESCRIPTIONS = {
 }
 
 HTML_CANDIDATES = (
-    Path("dist") / "NextJianghu2SaveEditor-v1.0.2.html",
+    Path("dist") / "NextJianghu2SaveEditor-v1.0.3.html",
     Path("src") / "editor-page.html",
 )
 SUB_SLOT_BAG_BEGIN = 12
@@ -443,6 +443,24 @@ def discover_saves(root: Optional[os.PathLike[str] | str] = None) -> List[Dict[s
             "slots": slots}
 
 
+def _decode_json_field(value: Any) -> Any:
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(value, (dict, list)):
+        return value
+    return None
+
+
+def _encode_json_field(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def _get_player_from_doc(doc: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     if not isinstance(doc, dict):
         raise ValueError("save JSON root must be an object")
@@ -450,7 +468,7 @@ def _get_player_from_doc(doc: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     if not isinstance(pe, dict):
         raise ValueError("save JSON has no playerentity object")
     for guid, player in pe.items():
-        if isinstance(player, dict) and isinstance(player.get("m_valueBase"), dict):
+        if isinstance(player, dict) and isinstance(_decode_json_field(player.get("m_valueBase")), dict):
             return str(guid), player
     for guid, player in pe.items():
         if isinstance(player, dict):
@@ -464,10 +482,87 @@ def get_player(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _value_base(player: Dict[str, Any]) -> Dict[str, Any]:
-    vb = player.get("m_valueBase")
+    vb = _decode_json_field(player.get("m_valueBase"))
     if not isinstance(vb, dict):
         raise ValueError("player has no m_valueBase object")
-    return vb
+    return dict(vb)
+
+
+INT32_MIN = -2147483648
+INT32_MAX = 2147483647
+WPJ_DICT_FIELDS = ("m_valueBase", "m_learntSpell", "m_EquipedStuntIds", "qgactive")
+WPJ_LIST_FIELDS = ("mijiIdList", "m_StuntIds", "talents", "learnedpeifang", "m0", "m1", "m8", "m9", "m_AchievementList")
+WPJ_ROOT_FIELDS = ("allentityids", "npcGuidProidDic")
+
+
+def _write_value_base(player: Dict[str, Any], vb: Dict[str, Any]) -> None:
+    out: Dict[str, int] = {}
+    for k, v in vb.items():
+        iv = _int_like(v, f"m_valueBase[{k}]")
+        if iv < INT32_MIN or iv > INT32_MAX:
+            raise ValueError(f"m_valueBase[{k}] out of int32 range: {iv}")
+        out[str(k)] = iv
+    player["m_valueBase"] = _encode_json_field(out)
+
+
+_STUNT_TYPE_OVERRIDES = {6400: 94, 6401: 94, 6402: 94, 6403: 94, 6405: 94, 6406: 94}
+
+
+def _convert_legacy_dict_list(field: str, items: List[Any]) -> Dict[str, Any]:
+    ints: List[int] = []
+    for x in items:
+        try:
+            ints.append(_int_like(x, field))
+        except ValueError:
+            continue
+    if field == "m_learntSpell":
+        return {"0": ints} if ints else {}
+    if field == "qgactive":
+        out_qg: Dict[str, int] = {}
+        for v in ints:
+            out_qg[str(v // 10)] = v
+        return out_qg
+    out_st: Dict[str, int] = {}
+    for v in ints:
+        out_st[str(_STUNT_TYPE_OVERRIDES.get(v, v // 100))] = v
+    return out_st
+
+
+def normalize_write_property_json_root(doc: Dict[str, Any]) -> None:
+    if not isinstance(doc, dict):
+        return
+    for group_key in ("playerentity", "Entitys"):
+        group = doc.get(group_key)
+        if not isinstance(group, dict):
+            continue
+        for ent in group.values():
+            if not isinstance(ent, dict):
+                continue
+            for fn in WPJ_DICT_FIELDS:
+                if fn not in ent or ent[fn] is None:
+                    continue
+                val = ent[fn]
+                decoded = _decode_json_field(val)
+                if fn != "m_valueBase" and isinstance(decoded, list):
+                    ent[fn] = _encode_json_field(_convert_legacy_dict_list(fn, decoded))
+                elif not isinstance(val, str):
+                    ent[fn] = _encode_json_field(val)
+            for fn in WPJ_LIST_FIELDS:
+                if fn in ent and ent[fn] is not None and not isinstance(ent[fn], str):
+                    ent[fn] = _encode_json_field(ent[fn])
+            dt = ent.get("m_DaTiTime")
+            if isinstance(dt, int) and not isinstance(dt, bool):
+                ent["m_DaTiTime"] = float(dt)
+            storage = ent.get("itemStorage")
+            if isinstance(storage, dict) and isinstance(storage.get("content"), dict):
+                for row in storage["content"].values():
+                    if isinstance(row, dict) and "4" in row:
+                        p4 = row["4"]
+                        if isinstance(p4, int) and not isinstance(p4, bool):
+                            row["4"] = float(p4)
+    for rk in WPJ_ROOT_FIELDS:
+        if rk in doc and doc[rk] is not None and not isinstance(doc[rk], str):
+            doc[rk] = _encode_json_field(doc[rk])
 
 
 def _int_like(value: Any, label: str = "value") -> int:
@@ -485,17 +580,74 @@ def _int_like(value: Any, label: str = "value") -> int:
 
 
 def _set_int_like(container: Dict[str, Any], key: str, value: int) -> None:
-    old = container.get(key)
-    if isinstance(old, str):
-        container[key] = str(value)
-    else:
-        container[key] = int(value)
+    container[key] = int(value)
 
 
-def validate_doc(doc: Dict[str, Any]) -> List[str]:
+def _validate_entity_wpj(
+    ent: Dict[str, Any],
+    prefix: str,
+    errors: List[str],
+    strict_strings: bool,
+    require_value_base: bool,
+) -> None:
+    if require_value_base or ("m_valueBase" in ent and ent["m_valueBase"] not in (None, "")):
+        raw_vb = ent.get("m_valueBase")
+        if strict_strings and not isinstance(raw_vb, str):
+            errors.append(f"{prefix}.m_valueBase must be a WritePropertyJson string")
+        elif not isinstance(_decode_json_field(raw_vb), dict):
+            errors.append(f"{prefix}.m_valueBase is missing or not a valid JSON object")
+    for dict_key in ("m_learntSpell", "m_EquipedStuntIds", "qgactive"):
+        if dict_key in ent and ent.get(dict_key) not in (None, ""):
+            raw_val = ent.get(dict_key)
+            if strict_strings and not isinstance(raw_val, str):
+                errors.append(f"{prefix}.{dict_key} must be a WritePropertyJson string")
+            else:
+                decoded = _decode_json_field(raw_val)
+                if strict_strings:
+                    if not isinstance(decoded, dict):
+                        errors.append(f"{prefix}.{dict_key} is not a valid JSON dictionary")
+                    elif dict_key == "m_learntSpell" and any(not isinstance(v, list) for v in decoded.values()):
+                        errors.append(f"{prefix}.m_learntSpell values must be JSON lists")
+                elif not isinstance(decoded, (dict, list)):
+                    errors.append(f"{prefix}.{dict_key} is not a valid JSON dictionary or legacy list")
+    for list_key in WPJ_LIST_FIELDS:
+        if list_key in ent and ent.get(list_key) not in (None, ""):
+            raw_val = ent.get(list_key)
+            if strict_strings and not isinstance(raw_val, str):
+                errors.append(f"{prefix}.{list_key} must be a WritePropertyJson string")
+            else:
+                decoded = _decode_json_field(raw_val)
+                if not isinstance(decoded, list):
+                    errors.append(f"{prefix}.{list_key} is not a valid JSON list")
+    if strict_strings:
+        if "m_DaTiTime" in ent:
+            dt = ent.get("m_DaTiTime")
+            if isinstance(dt, int) and not isinstance(dt, bool):
+                errors.append(f"{prefix}.m_DaTiTime must be a float/double literal")
+        storage = ent.get("itemStorage")
+        if isinstance(storage, dict) and isinstance(storage.get("content"), dict):
+            for slot_k, row in storage["content"].items():
+                if isinstance(row, dict) and "4" in row:
+                    p4 = row["4"]
+                    if isinstance(p4, int) and not isinstance(p4, bool):
+                        errors.append(f"{prefix}.itemStorage.content.{slot_k}.4 must be a float/double literal")
+
+
+def validate_doc(doc: Dict[str, Any], strict_strings: bool = True) -> List[str]:
     errors: List[str] = []
     if not isinstance(doc, dict):
         return ["root is not an object"]
+    if strict_strings:
+        for rk in WPJ_ROOT_FIELDS:
+            if rk in doc and doc[rk] not in (None, ""):
+                if not isinstance(doc[rk], str):
+                    errors.append(f"root.{rk} must be a WritePropertyJson string")
+                else:
+                    decoded_root = _decode_json_field(doc[rk])
+                    if rk == "allentityids" and not isinstance(decoded_root, list):
+                        errors.append("root.allentityids must decode to a JSON list")
+                    elif rk == "npcGuidProidDic" and not isinstance(decoded_root, dict):
+                        errors.append("root.npcGuidProidDic must decode to a JSON dictionary")
     if "playerentity" not in doc or not isinstance(doc["playerentity"], dict):
         errors.append("missing playerentity object")
     else:
@@ -505,10 +657,19 @@ def validate_doc(doc: Dict[str, Any]) -> List[str]:
             errors.append(str(exc))
             player = None
         if isinstance(player, dict):
-            if not isinstance(player.get("m_valueBase"), dict):
-                errors.append("player.m_valueBase is missing or not an object")
+            _validate_entity_wpj(player, "player", errors, strict_strings, require_value_base=True)
             if "itemStorage" in player and not isinstance(player.get("itemStorage"), dict):
                 errors.append("player.itemStorage is not an object")
+            elif isinstance(player.get("itemStorage"), dict) and isinstance(player["itemStorage"].get("content"), dict):
+                seen_uids: Dict[str, str] = {}
+                for slot_k, row in player["itemStorage"]["content"].items():
+                    if isinstance(row, dict) and "0" in row and row["0"] is not None:
+                        uid_s = str(row["0"])
+                        if uid_s and uid_s != "0":
+                            if uid_s in seen_uids:
+                                errors.append(f"duplicate item UID {uid_s} in slots {seen_uids[uid_s]} and {slot_k}")
+                            else:
+                                seen_uids[uid_s] = str(slot_k)
             jj_key = "jingjieGangLevel" if "jingjieGangLevel" in player else "m_jingJieLevel"
             if jj_key in player:
                 try:
@@ -517,9 +678,11 @@ def validate_doc(doc: Dict[str, Any]) -> List[str]:
                         errors.append(f"{jj_key} must be non-negative")
                 except ValueError as exc:
                     errors.append(str(exc))
-            for list_key in ("m_learntSpell", "mijiIdList", "m_StuntIds", "m_EquipedStuntIds", "talents", "learnedpeifang", "m8", "qgactive", "m_AchievementList"):
-                if list_key in player and not isinstance(player.get(list_key), list):
-                    errors.append(f"player.{list_key} is not a list")
+    if isinstance(doc.get("Entitys"), dict):
+        for ek, npc in doc["Entitys"].items():
+            if not isinstance(npc, dict):
+                continue
+            _validate_entity_wpj(npc, f"Entitys.{ek}", errors, strict_strings, require_value_base=False)
     if "m_ItemIdGenerator" in doc:
         try:
             _int_like(doc["m_ItemIdGenerator"], "m_ItemIdGenerator")
@@ -533,7 +696,7 @@ def load_save(path: os.PathLike[str] | str) -> Dict[str, Any]:
     with open(p, "rb") as f:
         data = f.read()
     try:
-        doc = json.loads(data.decode("utf-8"))
+        doc = json.loads(data.decode("utf-8-sig"))
     except UnicodeDecodeError as exc:
         raise ValidationError("save JSON is not valid UTF-8") from exc
     except json.JSONDecodeError as exc:
@@ -543,7 +706,8 @@ def load_save(path: os.PathLike[str] | str) -> Dict[str, Any]:
 
 def _summary_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     guid, player = _get_player_from_doc(doc)
-    vb = player.get("m_valueBase") if isinstance(player.get("m_valueBase"), dict) else {}
+    decoded_vb = _decode_json_field(player.get("m_valueBase"))
+    vb = decoded_vb if isinstance(decoded_vb, dict) else {}
     item_count = 0
     try:
         content = player.get("itemStorage", {}).get("content", {})
@@ -815,8 +979,7 @@ def _clamp_int(value: Any) -> int:
     return _int_like(value, "value")
 
 
-def _set_minimum(player: Dict[str, Any], keys: Iterable[str], minimum: int) -> None:
-    vb = _value_base(player)
+def _set_minimum(vb: Dict[str, Any], keys: Iterable[str], minimum: int) -> None:
     for key in keys:
         cur = vb.get(key, 0)
         try:
@@ -900,14 +1063,15 @@ def _starter_kit(doc: Dict[str, Any], player: Dict[str, Any]) -> None:
         uid = generator
         slot = _find_free_bag_slot(content)
         last_slot = max(last_slot, slot)
-        content[str(slot)] = {
+        item_row: Dict[str, Any] = {
             "0": uid,
             "1": proto,
-            "2": count,
-            "7": 0,
             "9": 10,
             "10": 1,
         }
+        if count > 1:
+            item_row["2"] = count
+        content[str(slot)] = item_row
     _sync_storage_count_min(storage, last_slot)
     doc["m_ItemIdGenerator"] = generator
 
@@ -924,6 +1088,7 @@ def apply_presets(
 ) -> Dict[str, Any]:
     _guid, player = _get_player_from_doc(doc)
     vb = _value_base(player)
+    vb_dirty = not isinstance(player.get("m_valueBase"), str)
     applied: List[str] = []
 
     for preset in presets:
@@ -934,13 +1099,17 @@ def apply_presets(
             _set_int_like(vb, "69", 1000000)
             _set_int_like(vb, "70", 500000)
             _set_int_like(vb, "66", 5000)
+            vb_dirty = True
         elif preset == "core_stats_500":
-            _set_minimum(player, [str(i) for i in range(4, 13)] + ["73"], 500)
-            _set_minimum(player, [str(i) for i in range(0, 4)], 50000)
+            _set_minimum(vb, [str(i) for i in range(4, 13)] + ["73"], 500)
+            _set_minimum(vb, [str(i) for i in range(0, 4)], 50000)
+            vb_dirty = True
         elif preset == "weapons_1000":
-            _set_minimum(player, [str(i) for i in range(34, 50)], 1000)
+            _set_minimum(vb, [str(i) for i in range(34, 50)], 1000)
+            vb_dirty = True
         elif preset == "life_master_1000":
-            _set_minimum(player, [str(i) for i in range(50, 66)], 1000)
+            _set_minimum(vb, [str(i) for i in range(50, 66)], 1000)
+            vb_dirty = True
         elif preset == "jingjie_13":
             player["jingjieGangLevel"] = 13
         elif preset == "starter_kit":
@@ -949,10 +1118,13 @@ def apply_presets(
 
     if money is not None:
         _set_int_like(vb, "68", int(money))
+        vb_dirty = True
     if xiuwei is not None:
         _set_int_like(vb, "69", int(xiuwei))
+        vb_dirty = True
     if ganwu is not None:
         _set_int_like(vb, "70", int(ganwu))
+        vb_dirty = True
 
     if attrs:
         for item in attrs:
@@ -967,6 +1139,10 @@ def apply_presets(
             except ValueError as exc:
                 raise ValueError(f"attribute value must be an integer: {item}") from exc
             _set_int_like(vb, key, val)
+            vb_dirty = True
+
+    if vb_dirty:
+        _write_value_base(player, vb)
 
     if jingjie is not None:
         jj = int(jingjie)
@@ -1004,17 +1180,19 @@ def apply_presets(
             uid = generator
             slot = _find_free_bag_slot(content)
             last_slot = max(last_slot, slot)
-            content[str(slot)] = {
+            item_row = {
                 "0": uid,
                 "1": proto,
-                "2": count,
-                "7": 0,
                 "9": 1,
                 "10": 1,
             }
+            if count > 1:
+                item_row["2"] = count
+            content[str(slot)] = item_row
         _sync_storage_count_min(storage, last_slot)
         doc["m_ItemIdGenerator"] = generator
 
+    normalize_write_property_json_root(doc)
     return {"playerGuid": _guid, "applied": applied}
 
 
@@ -1033,10 +1211,17 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if (save_path.exists() or header_path.exists()) and not args.force:
         raise Nj2Error(f"demo output already exists in {out_dir}; use --force")
 
-    guid = "11111111-2222-3333-4444-555555555555"
+    guid = "1"
     now = _utc_now_iso()
+    vb = {str(i): 100 + i for i in range(0, 95)}
+    vb["68"] = 12345
+    vb["69"] = 6789
+    vb["70"] = 4321
+    vb["71"] = 10
+    vb["94"] = 2
+
     player: Dict[str, Any] = {
-        "m_valueBase": {str(i): 100 + i for i in range(0, 95)},
+        "m_valueBase": _encode_json_field(vb),
         "itemStorage": {"count": 120, "content": {}},
         "name": "DemoHero",
         "jingjieGangLevel": 3,
@@ -1044,32 +1229,35 @@ def cmd_demo(args: argparse.Namespace) -> int:
         "m_GameTimeMonth": 3,
         "m_GameTimeDay": 15,
         "gongliRate": 100,
-        "m_learntSpell": [3, 4],
-        "mijiIdList": [10000],
-        "m_StuntIds": [3400, 3401],
-        "m_EquipedStuntIds": [3400],
-        "talents": [1, 2],
-        "learnedpeifang": [1001, 1002],
-        "m8": [100, 101],
-        "qgactive": [],
-        "m_AchievementList": [1, 2],
+        "m_learntSpell": _encode_json_field({"0": [3, 4]}),
+        "mijiIdList": _encode_json_field([10000]),
+        "m_StuntIds": _encode_json_field([3400, 3401]),
+        "m_EquipedStuntIds": _encode_json_field({"34": 3400}),
+        "talents": _encode_json_field([1, 2]),
+        "learnedpeifang": _encode_json_field([1001, 1002]),
+        "m0": _encode_json_field([10000, 10010]),
+        "m8": _encode_json_field([1]),
+        "qgactive": _encode_json_field({"101": 1010}),
+        "m_AchievementList": _encode_json_field([1, 2]),
     }
-    player["m_valueBase"]["68"] = 12345
-    player["m_valueBase"]["69"] = 6789
-    player["m_valueBase"]["70"] = 4321
-    player["m_valueBase"]["71"] = 10
-    player["m_valueBase"]["94"] = 2
 
     content = player["itemStorage"]["content"]
-    content["12"] = {"0": 1, "1": 10001, "2": 10, "7": 0, "9": 1, "10": 1}
-    content["13"] = {"0": 2, "1": 10002, "7": 0, "9": 1, "10": 1}
-    content["14"] = {"0": 3, "1": 10003, "2": 3, "7": 0, "9": 1, "10": 1}
+    content["12"] = {"0": 1, "1": 10001, "2": 10, "9": 10, "10": 1}
+    content["13"] = {"0": 2, "1": 10002, "4": 1.0, "9": 11, "10": 1}
+    content["14"] = {"0": 3, "1": 10003, "2": 3, "9": 12, "10": 1}
 
     doc = {
         "version": "77",
         "playername": "DemoHero",
         "filename": "savefile0",
         "playerentity": {guid: player},
+        "Entitys": {
+            "2": {
+                "guid": 2,
+                "m_DaTiTime": 0.0,
+                "m_valueBase": _encode_json_field({"0": 3200, "1": 900, "68": 500}),
+            }
+        },
         "m_ItemIdGenerator": 3,
         "maintaskName": "Demo Main Task",
         "m_GameDiff": 1,
@@ -1153,7 +1341,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     doc: Any = None
     if not errors:
         try:
-            doc = json.loads(raw.decode("utf-8"))
+            doc = json.loads(raw.decode("utf-8-sig"))
         except Exception as exc:
             errors.append(f"invalid JSON: {exc}")
     if doc is not None:
@@ -1196,8 +1384,15 @@ def cmd_edit(args: argparse.Namespace) -> int:
     if not src.is_file():
         raise Nj2Error(f"save file not found: {src}")
 
-    doc = load_save(src)
-    errors = validate_doc(doc)
+    raw_src = src.read_bytes()
+    has_bom = raw_src.startswith(b"\xef\xbb\xbf")
+    try:
+        doc = json.loads(raw_src.decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise ValidationError("save JSON is not valid UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"save JSON is invalid: {exc}") from exc
+    errors = validate_doc(doc, strict_strings=False)
     if errors:
         raise ValidationError("; ".join(errors))
 
@@ -1212,11 +1407,11 @@ def cmd_edit(args: argparse.Namespace) -> int:
         jingjie=args.jingjie,
     )
 
-    post_errors = validate_doc(doc)
+    post_errors = validate_doc(doc, strict_strings=True)
     if post_errors:
         raise ValidationError("; ".join(post_errors))
 
-    json_bytes = json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8")
+    json_bytes = (b"\xef\xbb\xbf" if has_bom else b"") + json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8")
 
     header_bytes: Optional[bytes] = None
     companion = src.with_suffix("")
@@ -1496,7 +1691,7 @@ class _Nj2RequestHandler(http.server.BaseHTTPRequestHandler):
 
                 raw_json = path.read_bytes()
                 try:
-                    text = raw_json.decode("utf-8")
+                    text = raw_json.decode("utf-8-sig")
                     doc = json.loads(text)
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise ValidationError("save is not valid UTF-8 JSON") from exc
@@ -1555,7 +1750,7 @@ class _Nj2RequestHandler(http.server.BaseHTTPRequestHandler):
                     raise BadRequestError("jsonBase64 or jsonText is required")
 
                 try:
-                    doc = json.loads(json_bytes.decode("utf-8"))
+                    doc = json.loads(json_bytes.decode("utf-8-sig"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise ValidationError("save data is not valid UTF-8 JSON") from exc
                 errs = validate_doc(doc)

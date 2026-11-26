@@ -78,7 +78,7 @@
 
   var LIST_FIELDS = [
     'm_learntSpell', 'mijiIdList', 'm_StuntIds', 'm_EquipedStuntIds',
-    'talents', 'learnedpeifang', 'm8', 'qgactive', 'm_AchievementList'
+    'talents', 'learnedpeifang', 'm0', 'm1', 'm8', 'qgactive', 'm_AchievementList'
   ];
 
   var LIST_FIELD_LABELS = {
@@ -88,9 +88,27 @@
     m_EquipedStuntIds: '장착 특기',
     talents: '선천 천부',
     learnedpeifang: '습득 제조법',
-    m8: '활성 경맥 노드',
+    m0: '활성 경맥 노드',
+    m1: '활성 오장 노드',
+    m8: '완료 경맥 목록',
+    m9: '완료 오장 목록',
     qgactive: '활성 경공 노드',
     m_AchievementList: '달성 업적'
+  };
+
+  var FIELD_SCHEMAS = {
+    m_learntSpell: { type: 'dict_list' },
+    m_EquipedStuntIds: { type: 'dict_val' },
+    qgactive: { type: 'dict_val' },
+    mijiIdList: { type: 'list' },
+    m_StuntIds: { type: 'list' },
+    talents: { type: 'list' },
+    learnedpeifang: { type: 'list' },
+    m0: { type: 'list' },
+    m1: { type: 'list' },
+    m8: { type: 'list' },
+    m9: { type: 'list' },
+    m_AchievementList: { type: 'list' }
   };
 
   function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
@@ -262,6 +280,34 @@
     return out;
   }
 
+  function listEntitiesWithPaths(session) {
+    var out = [];
+    if (session.player) {
+      out.push({ entity: session.player, basePath: 'playerentity\x1f' + session.playerKey, isPlayer: true });
+    }
+    var ents = session.root && session.root.Entitys;
+    if (isObj(ents)) {
+      var keys = Object.keys(ents);
+      for (var i = 0; i < keys.length; i++) {
+        if (isObj(ents[keys[i]])) {
+          out.push({ entity: ents[keys[i]], basePath: 'Entitys\x1f' + keys[i], isPlayer: false });
+        }
+      }
+    }
+    return out;
+  }
+
+  function entityBasePath(session, entityId) {
+    if (!entityId || String(entityId) === String(session.playerKey)) {
+      return 'playerentity\x1f' + session.playerKey;
+    }
+    return 'Entitys\x1f' + String(entityId);
+  }
+
+  function itemUidPath(basePath, slotKey) {
+    return basePath + '\x1fitemStorage\x1fcontent\x1f' + String(slotKey) + '\x1f' + UID_KEY;
+  }
+
   function readItemContent(entity) {
     if (!isObj(entity) || !isObj(entity.itemStorage)) { return null; }
     return isObj(entity.itemStorage.content) ? entity.itemStorage.content : null;
@@ -277,9 +323,327 @@
     return ensureItemContent(entity);
   }
 
-  function attrBaseOf(entity) {
-    if (!isObj(entity)) { return null; }
-    return ensureObj(entity, 'm_valueBase');
+  function hasOwn(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function decodeField(val) {
+    if (val === undefined || val === null || val === '') { return null; }
+    if (typeof val === 'string') {
+      return Nj2Codec && typeof Nj2Codec.decodeJsonField === 'function'
+        ? Nj2Codec.decodeJsonField(val)
+        : null;
+    }
+    return typeof val === 'object' ? val : null;
+  }
+
+  function encodeField(val) {
+    if (Nj2Codec && typeof Nj2Codec.encodeJsonField === 'function') {
+      return Nj2Codec.encodeJsonField(val);
+    }
+    return JSON.stringify(val);
+  }
+
+  function readValueBase(entity) {
+    var out = {};
+    if (!isObj(entity)) { return out; }
+    var decoded = decodeField(entity.m_valueBase);
+    if (isObj(decoded)) {
+      var ks = Object.keys(decoded);
+      for (var i = 0; i < ks.length; i++) {
+        out[ks[i]] = decoded[ks[i]];
+      }
+    }
+    return out;
+  }
+
+  function writeValueBase(entity, map) {
+    if (!isObj(entity)) { return; }
+    var src = isObj(map) ? map : {};
+    var out = {};
+    var ks = Object.keys(src);
+    for (var i = 0; i < ks.length; i++) {
+      var k = ks[i];
+      var n = toInt(src[k], null);
+      if (n !== null) {
+        out[k] = n;
+      }
+    }
+    entity.m_valueBase = encodeField(out);
+  }
+
+  function getAttributes(session, entityId) {
+    if (!session || !session.root) { return {}; }
+    var target = getEntity(session, entityId);
+    return target ? readValueBase(target) : {};
+  }
+
+  function normalizeIdArray(val) {
+    var arr = [];
+    if (!isArr(val)) { return arr; }
+    for (var i = 0; i < val.length; i++) {
+      var n = toInt(val[i], null);
+      if (n !== null) { arr.push(n); }
+    }
+    return arr;
+  }
+
+  function spellBucketKey(id) {
+    var entry = getCatalogIndex().spell[String(id)];
+    var st = (entry && entry.spellType !== undefined && entry.spellType !== null) ? toInt(entry.spellType, 0) : 0;
+    return String(st);
+  }
+
+  function stuntSlotKey(id) {
+    var entry = getCatalogIndex().stunt[String(id)];
+    var st = (entry && entry.stuntType !== undefined && entry.stuntType !== null) ? toInt(entry.stuntType, 0) : 0;
+    return String(st);
+  }
+
+  function qinggongGroupKey(id) {
+    var entry = getCatalogIndex().qinggong[String(id)];
+    var gid = (entry && entry.groupId !== undefined && entry.groupId !== null) ? toInt(entry.groupId, Math.floor(id / 10)) : Math.floor(id / 10);
+    return String(gid);
+  }
+
+  function decodeDictList(val) {
+    var decoded = decodeField(val);
+    var dict = {};
+    if (!decoded || typeof decoded !== 'object') { return dict; }
+    if (isArr(decoded)) {
+      var ids = normalizeIdArray(decoded);
+      for (var i = 0; i < ids.length; i++) {
+        var bk = spellBucketKey(ids[i]);
+        if (!dict[bk]) { dict[bk] = []; }
+        if (dict[bk].indexOf(ids[i]) === -1) { dict[bk].push(ids[i]); }
+      }
+      return dict;
+    }
+    var ks = Object.keys(decoded);
+    for (var k = 0; k < ks.length; k++) {
+      var key = ks[k];
+      dict[key] = normalizeIdArray(decoded[key]);
+    }
+    return dict;
+  }
+
+  function decodeDictVal(val, fieldName) {
+    var decoded = decodeField(val);
+    var dict = {};
+    if (!decoded || typeof decoded !== 'object') { return dict; }
+    if (isArr(decoded)) {
+      var ids = normalizeIdArray(decoded);
+      for (var i = 0; i < ids.length; i++) {
+        var dk = fieldName === 'qgactive' ? qinggongGroupKey(ids[i]) : stuntSlotKey(ids[i]);
+        dict[dk] = ids[i];
+      }
+      return dict;
+    }
+    var ks = Object.keys(decoded);
+    for (var k = 0; k < ks.length; k++) {
+      var key = ks[k];
+      var n = toInt(decoded[key], null);
+      if (n !== null) { dict[key] = n; }
+    }
+    return dict;
+  }
+
+  function decodeListField(val) {
+    var decoded = decodeField(val);
+    if (isArr(decoded)) { return normalizeIdArray(decoded); }
+    return [];
+  }
+
+  function getFieldIds(session, fieldName, entityId) {
+    var schema = FIELD_SCHEMAS[fieldName];
+    if (!schema || !session || !session.root) { return []; }
+    var target = getEntity(session, entityId);
+    if (!target) { return []; }
+    var raw = target[fieldName];
+    var ids = [];
+    var seen = {};
+    var i, k, ks;
+    if (schema.type === 'dict_list') {
+      var dl = decodeDictList(raw);
+      ks = Object.keys(dl);
+      for (k = 0; k < ks.length; k++) {
+        var arr = dl[ks[k]];
+        for (i = 0; i < arr.length; i++) {
+          if (!seen[String(arr[i])]) { seen[String(arr[i])] = true; ids.push(arr[i]); }
+        }
+      }
+      return ids;
+    }
+    if (schema.type === 'dict_val') {
+      var dv = decodeDictVal(raw, fieldName);
+      ks = Object.keys(dv);
+      for (k = 0; k < ks.length; k++) {
+        var n = dv[ks[k]];
+        if (!seen[String(n)]) { seen[String(n)] = true; ids.push(n); }
+      }
+      return ids;
+    }
+    return decodeListField(raw);
+  }
+
+  function normalizeEntityWritePropertyJson(entity) {
+    if (!isObj(entity)) { return; }
+    if (entity.m_valueBase !== undefined && entity.m_valueBase !== null && typeof entity.m_valueBase !== 'string') {
+      writeValueBase(entity, readValueBase(entity));
+    }
+    var fieldNames = Object.keys(FIELD_SCHEMAS);
+    for (var f = 0; f < fieldNames.length; f++) {
+      var fn = fieldNames[f];
+      var val = entity[fn];
+      if (val === undefined || val === null || typeof val === 'string') { continue; }
+      var schema = FIELD_SCHEMAS[fn];
+      if (schema.type === 'dict_list') {
+        entity[fn] = encodeField(decodeDictList(val));
+      } else if (schema.type === 'dict_val') {
+        entity[fn] = encodeField(decodeDictVal(val, fn));
+      } else {
+        entity[fn] = encodeField(decodeListField(val));
+      }
+    }
+  }
+
+  function normalizeWritePropertyJsonRoot(rootObj) {
+    if (!isObj(rootObj)) { return; }
+    var cols = ['playerentity', 'Entitys'];
+    for (var c = 0; c < cols.length; c++) {
+      var group = rootObj[cols[c]];
+      if (!isObj(group)) { continue; }
+      var ks = Object.keys(group);
+      for (var i = 0; i < ks.length; i++) {
+        normalizeEntityWritePropertyJson(group[ks[i]]);
+      }
+    }
+    var rootStrFields = ['allentityids', 'npcGuidProidDic'];
+    for (var r = 0; r < rootStrFields.length; r++) {
+      var rk = rootStrFields[r];
+      if (rootObj[rk] !== undefined && rootObj[rk] !== null && typeof rootObj[rk] !== 'string') {
+        rootObj[rk] = encodeField(rootObj[rk]);
+      }
+    }
+  }
+
+  function detectCorruptedWritePropertyJson(rootObj) {
+    var corrupted = [];
+    if (!isObj(rootObj)) { return corrupted; }
+    var cols = ['playerentity', 'Entitys'];
+    var fnames = Object.keys(FIELD_SCHEMAS);
+    for (var c = 0; c < cols.length; c++) {
+      var group = rootObj[cols[c]];
+      if (!isObj(group)) { continue; }
+      var ks = Object.keys(group);
+      for (var i = 0; i < ks.length; i++) {
+        var ent = group[ks[i]];
+        if (!isObj(ent)) { continue; }
+        if (ent.m_valueBase !== undefined && ent.m_valueBase !== null && typeof ent.m_valueBase !== 'string') {
+          corrupted.push(cols[c] + '.' + ks[i] + '.m_valueBase');
+        }
+        for (var fi = 0; fi < fnames.length; fi++) {
+          var fn = fnames[fi];
+          if (hasOwn(ent, fn) && ent[fn] !== undefined && ent[fn] !== null && typeof ent[fn] !== 'string') {
+            corrupted.push(cols[c] + '.' + ks[i] + '.' + fn);
+          }
+        }
+      }
+    }
+    var rootStrFields = ['allentityids', 'npcGuidProidDic'];
+    for (var r = 0; r < rootStrFields.length; r++) {
+      var rk = rootStrFields[r];
+      if (rootObj[rk] !== undefined && rootObj[rk] !== null && typeof rootObj[rk] !== 'string') {
+        corrupted.push(rk);
+      }
+    }
+    return corrupted;
+  }
+
+  function ensureRawBigInts(session) {
+    if (!session) { return null; }
+    if (!session.doc || typeof session.doc !== 'object') {
+      session.doc = { root: session.root, rawBigInts: new Map(), floatPaths: new Set() };
+    }
+    if (!(session.doc.rawBigInts instanceof Map)) {
+      session.doc.rawBigInts = new Map();
+    }
+    return session.doc.rawBigInts;
+  }
+
+  function getExactUidStr(session, path, rawVal) {
+    var map = session && session.doc && session.doc.rawBigInts instanceof Map ? session.doc.rawBigInts : null;
+    if (map && path && map.has(path)) {
+      return map.get(path);
+    }
+    if (rawVal === undefined || rawVal === null || rawVal === '') { return ''; }
+    return String(rawVal);
+  }
+
+  function getExactUidBig(session, path, rawVal) {
+    return parseUidToBigInt(getExactUidStr(session, path, rawVal));
+  }
+
+  function setUidAtPath(session, path, bigVal, obj, prop) {
+    var isBig = typeof BigInt === 'function' && typeof bigVal === 'bigint';
+    var numVal = Number(bigVal);
+    obj[prop] = numVal;
+    var map = ensureRawBigInts(session);
+    if (map && path) {
+      if (isBig && bigVal > BigInt(Number.MAX_SAFE_INTEGER)) {
+        map.set(path, bigVal.toString());
+      } else {
+        map.delete(path);
+      }
+    }
+    return isBig && bigVal > BigInt(Number.MAX_SAFE_INTEGER) ? bigVal.toString() : numVal;
+  }
+
+  function parseUidToBigInt(val) {
+    if (val === undefined || val === null || val === '') { return null; }
+    var s = String(val).trim();
+    if (!/^\d+$/.test(s)) { return null; }
+    if (typeof BigInt === 'function') {
+      try { return BigInt(s); } catch (e) { return null; }
+    }
+    var n = parseInt(s, 10);
+    return isFinite(n) && n >= 0 ? n : null;
+  }
+
+  function bigIntToUidValue(b) {
+    if (typeof BigInt === 'function' && typeof b === 'bigint') {
+      if (b <= BigInt(Number.MAX_SAFE_INTEGER)) { return Number(b); }
+      return b.toString();
+    }
+    return Number(b);
+  }
+
+  function compareBig(a, b) {
+    return a < b ? -1 : (a > b ? 1 : 0);
+  }
+
+  function collectMaxUidBig(session) {
+    var zero = typeof BigInt === 'function' ? BigInt(0) : 0;
+    var maxUid = zero;
+    var entries = listEntitiesWithPaths(session);
+    for (var i = 0; i < entries.length; i++) {
+      var content = readItemContent(entries[i].entity);
+      if (!content) { continue; }
+      var keys = Object.keys(content);
+      for (var j = 0; j < keys.length; j++) {
+        var slotKey = keys[j];
+        var row = content[slotKey];
+        var uidPath = itemUidPath(entries[i].basePath, slotKey);
+        var c = isObj(row) ? getExactUidBig(session, uidPath, row[UID_KEY]) : null;
+        if (c === null) { c = parseUidToBigInt(slotKey); }
+        if (c !== null && compareBig(c, maxUid) > 0) { maxUid = c; }
+      }
+    }
+    return maxUid;
+  }
+
+  function collectMaxUid(session) {
+    return bigIntToUidValue(collectMaxUidBig(session));
   }
 
   function parseSlotKey(key) {
@@ -308,23 +672,6 @@
     return slot;
   }
 
-  function collectMaxUid(session) {
-    var maxUid = 0;
-    var entities = listEntities(session);
-    for (var i = 0; i < entities.length; i++) {
-      var content = readItemContent(entities[i]);
-      if (!content) { continue; }
-      var keys = Object.keys(content);
-      for (var j = 0; j < keys.length; j++) {
-        var row = content[keys[j]];
-        var c = isObj(row) ? toInt(row[UID_KEY], NaN) : NaN;
-        if (isNaN(c)) { c = toInt(keys[j], NaN); }
-        if (!isNaN(c) && c > maxUid) { maxUid = c; }
-      }
-    }
-    return maxUid;
-  }
-
   function syncEntityStorage(entity) {
     if (!isObj(entity) || !isObj(entity.itemStorage)) { return; }
     var content = readItemContent(entity);
@@ -342,13 +689,9 @@
     var player = session.player;
 
     if (player) {
-      if (typeof player.name === 'string' && player.name.length > 0) {
+      if (typeof player.name === 'string' && player.name.length > 0 && rootObj.playername !== undefined && rootObj.playername !== player.name) {
         rootObj.playername = player.name;
-      } else if (typeof rootObj.playername === 'string' && rootObj.playername.length > 0) {
-        player.name = rootObj.playername;
       }
-      if (rootObj.posX !== undefined) { player.savePosx = String(rootObj.posX); }
-      if (rootObj.posZ !== undefined) { player.savePosz = String(rootObj.posZ); }
     }
 
     var entities = listEntities(session);
@@ -356,10 +699,12 @@
       syncEntityStorage(entities[i]);
     }
 
-    var maxUid = collectMaxUid(session);
-    var gen = toInt(rootObj.m_ItemIdGenerator, 0);
-    if (gen < maxUid || rootObj.m_ItemIdGenerator === undefined) {
-      rootObj.m_ItemIdGenerator = maxUid;
+    var maxUidBig = collectMaxUidBig(session);
+    var genBig = getExactUidBig(session, 'm_ItemIdGenerator', rootObj.m_ItemIdGenerator);
+    if (genBig === null || compareBig(genBig, maxUidBig) < 0) {
+      if (rootObj.m_ItemIdGenerator !== undefined || compareBig(maxUidBig, typeof BigInt === 'function' ? BigInt(0) : 0) > 0) {
+        setUidAtPath(session, 'm_ItemIdGenerator', maxUidBig, rootObj, 'm_ItemIdGenerator');
+      }
     }
 
     var meta = session.companionMeta;
@@ -394,11 +739,6 @@
       throw new Error('주인공 데이터가 올바르지 않습니다.');
     }
 
-    ensureObj(player, 'm_valueBase');
-    var storage = ensureObj(player, 'itemStorage');
-    ensureObj(storage, 'content');
-    if (!isObj(rootObj.Entitys)) { rootObj.Entitys = {}; }
-
     var metaCopy = null;
     if (companionMeta instanceof Uint8Array || (typeof ArrayBuffer !== 'undefined' && companionMeta instanceof ArrayBuffer)) {
       metaCopy = Nj2Codec.parseCompanionHeader(companionMeta);
@@ -406,16 +746,25 @@
       metaCopy = clone(companionMeta);
     }
 
+    var origBigInts = parsed.rawBigInts instanceof Map ? new Map(parsed.rawBigInts) : new Map();
+    if (!(parsed.rawBigInts instanceof Map)) {
+      parsed.rawBigInts = new Map();
+    }
+    var corruptedFields = detectCorruptedWritePropertyJson(rootObj);
+    var needsRepair = corruptedFields.length > 0;
+
     var session = {
       doc: parsed,
       root: rootObj,
       playerKey: playerKey,
       player: player,
       companionMeta: metaCopy,
-      dirty: false,
+      dirty: needsRepair,
+      needsRepair: needsRepair,
+      corruptedFields: corruptedFields,
+      originalRawBigInts: origBigInts,
       originalRoot: clone(rootObj)
     };
-    syncDerived(session);
     return session;
   }
 
@@ -434,10 +783,23 @@
     }
     var rootObj = session.root;
     var player = session.player;
-    var base = isObj(player) && isObj(player.m_valueBase) ? player.m_valueBase : null;
-    if (!base) {
+    var rawVb = isObj(player) ? player.m_valueBase : undefined;
+    var base = null;
+    if (rawVb === undefined || rawVb === null) {
       errors.push('주인공 속성 표(m_valueBase)가 없습니다.');
+    } else if (typeof rawVb === 'string') {
+      var decodedVb = decodeField(rawVb);
+      if (!isObj(decodedVb)) {
+        errors.push('주인공 속성 표(m_valueBase) JSON 문자열이 손상되었습니다.');
+      } else {
+        base = decodedVb;
+      }
+    } else if (isObj(rawVb)) {
+      base = rawVb;
     } else {
+      errors.push('주인공 속성 표(m_valueBase) 형식이 올바르지 않습니다.');
+    }
+    if (base) {
       var bkeys = Object.keys(base);
       for (var bi = 0; bi < bkeys.length; bi++) {
         var k = bkeys[bi];
@@ -462,6 +824,31 @@
       }
     }
 
+    var corruptedNow = detectCorruptedWritePropertyJson(rootObj);
+    if (corruptedNow.length > 0 || session.needsRepair) {
+      warnings.push('이전 버전(v1.0.2 등) 손상 의심(비문자열 직렬화 필드 감지): 원본 .backup-*.bak 백업에서 복원한 뒤 v1.0.3으로 다시 편집하는 것을 강력 권장합니다.');
+    }
+
+    if (isObj(player)) {
+      var fnames = Object.keys(FIELD_SCHEMAS);
+      for (var fi = 0; fi < fnames.length; fi++) {
+        var fn = fnames[fi];
+        if (!hasOwn(player, fn) || player[fn] === undefined || player[fn] === null || player[fn] === '') { continue; }
+        var fv = player[fn];
+        var fschema = FIELD_SCHEMAS[fn];
+        if (typeof fv === 'string') {
+          var parsedFv = decodeField(fv);
+          if (parsedFv === null) {
+            errors.push('항목 ' + fn + ' JSON 문자열이 손상되었습니다.');
+          } else if ((fschema.type === 'dict_list' || fschema.type === 'dict_val') && !isObj(parsedFv)) {
+            errors.push('항목 ' + fn + ' 형식이 객체(Dictionary)가 아닙니다.');
+          } else if (fschema.type === 'list' && !isArr(parsedFv)) {
+            errors.push('항목 ' + fn + ' 형식이 배열(List)이 아닙니다.');
+          }
+        }
+      }
+    }
+
     var jl = readJingjieLevel(session);
     if (jl < JINGJIE_MIN || jl > JINGJIE_MAX) {
       warnings.push('경계 단계가 기본 범위(' + JINGJIE_MIN + ' ~ ' + JINGJIE_MAX + ')를 벗어났습니다: ' + jl);
@@ -476,9 +863,11 @@
       }
     }
 
-    var entities = listEntities(session);
-    for (var e = 0; e < entities.length; e++) {
-      var entity = entities[e];
+    var entityEntries = listEntitiesWithPaths(session);
+    var seenPlayerUids = {};
+    for (var e = 0; e < entityEntries.length; e++) {
+      var ep = entityEntries[e];
+      var entity = ep.entity;
       if (!isObj(entity) || !isObj(entity.itemStorage)) { continue; }
       var content = readItemContent(entity);
       if (!content) { continue; }
@@ -492,6 +881,16 @@
         if (!isObj(row)) {
           errors.push('아이템 슬롯 ' + slotKey + ' 구조가 올바르지 않습니다.');
           continue;
+        }
+        if (ep.isPlayer) {
+          var uidStr = getExactUidStr(session, itemUidPath(ep.basePath, slotKey), row[UID_KEY]);
+          if (uidStr && uidStr !== '0') {
+            if (hasOwn(seenPlayerUids, uidStr)) {
+              errors.push('중복된 아이템 고유 번호(' + uidStr + ')가 슬롯 ' + seenPlayerUids[uidStr] + '과 ' + slotKey + '에 존재합니다.');
+            } else {
+              seenPlayerUids[uidStr] = slotKey;
+            }
+          }
         }
         // 게임 Item.Save()는 수량(nOverlap)이 1일 때 키 '2'를 생략한다.
         var rawCount = row[COUNT_KEY];
@@ -519,10 +918,13 @@
       }
     }
 
-    var maxUid = collectMaxUid(session);
-    var gen = toInt(rootObj.m_ItemIdGenerator, 0);
-    if (gen < maxUid) {
-      warnings.push('아이템 번호 생성기(' + gen + ')가 최대 번호(' + maxUid + ')보다 작습니다.');
+    var maxUidBig = collectMaxUidBig(session);
+    var genBig = getExactUidBig(session, 'm_ItemIdGenerator', rootObj.m_ItemIdGenerator);
+    var zeroBig = typeof BigInt === 'function' ? BigInt(0) : 0;
+    if (genBig !== null && compareBig(genBig, maxUidBig) < 0) {
+      warnings.push('아이템 번호 생성기(' + bigIntToUidValue(genBig) + ')가 최대 번호(' + bigIntToUidValue(maxUidBig) + ')보다 작습니다.');
+    } else if (genBig === null && compareBig(maxUidBig, zeroBig) > 0) {
+      warnings.push('아이템 번호 생성기(0)가 최대 번호(' + bigIntToUidValue(maxUidBig) + ')보다 작습니다.');
     }
 
     return { ok: errors.length === 0, errors: errors, warnings: warnings };
@@ -555,6 +957,12 @@
         var f = toNum(v, NaN);
         if (isNaN(f)) { return failMsg(k + ' 값은 숫자여야 합니다.'); }
         session.root[k] = f;
+        if (k === 'posX' && session.player.savePosx !== undefined) {
+          session.player.savePosx = f.toFixed(1);
+        }
+        if (k === 'posZ' && session.player.savePosz !== undefined) {
+          session.player.savePosz = f.toFixed(1);
+        }
         continue;
       }
       var n = toInt(v, null);
@@ -595,19 +1003,37 @@
     }
     var target = getEntity(session, entityId);
     if (!target) { return failMsg('대상 엔티티를 찾지 못했습니다: ' + entityId); }
-    var base = attrBaseOf(target);
+    var base = readValueBase(target);
     base[String(idx)] = n;
+    writeValueBase(target, base);
     session.dirty = true;
     syncDerived(session);
     return okMsg();
   }
 
+  var UINT64_MAX_BIG = typeof BigInt === 'function' ? BigInt('18446744073709551615') : Number.MAX_SAFE_INTEGER;
+
+  function nextItemUidBig(session) {
+    var one = typeof BigInt === 'function' ? BigInt(1) : 1;
+    var zero = typeof BigInt === 'function' ? BigInt(0) : 0;
+    var gen = getExactUidBig(session, 'm_ItemIdGenerator', session.root.m_ItemIdGenerator);
+    if (gen === null) { gen = zero; }
+    var maxUid = collectMaxUidBig(session);
+    var base = compareBig(gen, maxUid) >= 0 ? gen : maxUid;
+    if (compareBig(base, UINT64_MAX_BIG) >= 0) {
+      return null;
+    }
+    var nextBig = base + one;
+    setUidAtPath(session, 'm_ItemIdGenerator', nextBig, session.root, 'm_ItemIdGenerator');
+    return nextBig;
+  }
+
   function nextItemUid(session) {
-    var gen = toInt(session.root.m_ItemIdGenerator, 0);
-    var maxUid = collectMaxUid(session);
-    var next = Math.max(gen, maxUid) + 1;
-    session.root.m_ItemIdGenerator = next;
-    return next;
+    var nb = nextItemUidBig(session);
+    if (nb === null) {
+      throw new Error('아이템 고유 번호 생성기가 UInt64 상한에 도달했습니다.');
+    }
+    return bigIntToUidValue(nb);
   }
 
   function addItem(session, protoId, count, opts) {
@@ -627,22 +1053,26 @@
 
     var target = o.entityId ? getEntity(session, o.entityId) : session.player;
     if (!target) { return failMsg('대상 엔티티를 찾지 못했습니다: ' + o.entityId); }
+    var targetPath = entityBasePath(session, o.entityId);
 
+    var uidBig = nextItemUidBig(session);
+    if (uidBig === null) {
+      return failMsg('아이템 고유 번호 생성기가 UInt64 상한(18446744073709551615)에 도달하여 아이템을 추가할 수 없습니다.');
+    }
     var content = ensureItemContent(target);
-    var uid = nextItemUid(session);
     var slot = findFreeBagSlot(content);
     var row = {};
-    row[UID_KEY] = uid;
+    var uidVal = setUidAtPath(session, itemUidPath(targetPath, slot), uidBig, row, UID_KEY);
     row[PROTO_KEY] = proto;
-    row[COUNT_KEY] = qty;
-    row[INTENSIFY_KEY] = intensify;
+    if (qty > 1) { row[COUNT_KEY] = qty; }
+    if (intensify > 0) { row[INTENSIFY_KEY] = intensify; }
     row[GRADE_KEY] = grade;
     row[LEVEL_KEY] = level;
     content[String(slot)] = row;
 
     session.dirty = true;
     syncDerived(session);
-    return okMsg({ uid: uid, slot: slot });
+    return okMsg({ uid: uidVal, slot: slot });
   }
 
   var ITEM_PATCH_KEYS = {
@@ -658,34 +1088,39 @@
     var candidates = [];
     if (o.entityId !== undefined && o.entityId !== null && o.entityId !== '') {
       var target = getEntity(session, o.entityId);
-      if (target) { candidates.push(target); }
+      if (target) {
+        candidates.push({ entity: target, basePath: entityBasePath(session, o.entityId) });
+      }
     } else {
-      candidates = listEntities(session);
+      candidates = listEntitiesWithPaths(session);
     }
 
     var slotOpt = (o.slot !== undefined && o.slot !== null && o.slot !== '') ? String(o.slot) : null;
     if (slotOpt !== null) {
       for (var s = 0; s < candidates.length; s++) {
-        var sc = readItemContent(candidates[s]);
+        var sc = readItemContent(candidates[s].entity);
         if (sc && isObj(sc[slotOpt])) {
-          return { entity: candidates[s], content: sc, slotKey: slotOpt, row: sc[slotOpt] };
+          return { entity: candidates[s].entity, entityPath: candidates[s].basePath, content: sc, slotKey: slotOpt, row: sc[slotOpt] };
         }
       }
     }
 
     var key = String(idOrSlot);
     for (var i = 0; i < candidates.length; i++) {
-      var content = readItemContent(candidates[i]);
+      var content = readItemContent(candidates[i].entity);
       if (!content) { continue; }
       var ckeys = Object.keys(content);
       for (var j = 0; j < ckeys.length; j++) {
         var r = content[ckeys[j]];
-        if (isObj(r) && r[UID_KEY] !== undefined && r[UID_KEY] !== null && String(r[UID_KEY]) === key) {
-          return { entity: candidates[i], content: content, slotKey: ckeys[j], row: r };
+        if (isObj(r) && r[UID_KEY] !== undefined && r[UID_KEY] !== null) {
+          var exactUid = getExactUidStr(session, itemUidPath(candidates[i].basePath, ckeys[j]), r[UID_KEY]);
+          if (exactUid === key) {
+            return { entity: candidates[i].entity, entityPath: candidates[i].basePath, content: content, slotKey: ckeys[j], row: r };
+          }
         }
       }
       if (isObj(content[key])) {
-        return { entity: candidates[i], content: content, slotKey: key, row: content[key] };
+        return { entity: candidates[i].entity, entityPath: candidates[i].basePath, content: content, slotKey: key, row: content[key] };
       }
     }
     return null;
@@ -708,7 +1143,13 @@
       var n = toInt(patch[field], null);
       if (n === null) { return failMsg(field + ' 값은 정수여야 합니다.'); }
       if (slot === COUNT_KEY && n < 1) { return failMsg('수량은 1 이상이어야 합니다.'); }
-      row[slot] = n;
+      if (slot === COUNT_KEY && n === 1) {
+        delete row[COUNT_KEY];
+      } else if (slot === INTENSIFY_KEY && n === 0) {
+        delete row[INTENSIFY_KEY];
+      } else {
+        row[slot] = n;
+      }
     }
     session.dirty = true;
     syncDerived(session);
@@ -721,6 +1162,21 @@
     var found = findItemEntry(session, key, opts);
     if (!found) { return failMsg('아이템을 찾지 못했습니다: ' + key); }
     delete found.content[found.slotKey];
+    if (found.entityPath && session.doc) {
+      var slotPrefix = found.entityPath + '\x1fitemStorage\x1fcontent\x1f' + found.slotKey + '\x1f';
+      if (session.doc.rawBigInts instanceof Map) {
+        session.doc.rawBigInts.delete(slotPrefix + UID_KEY);
+      }
+      if (session.doc.floatPaths instanceof Set) {
+        var toDrop = [];
+        session.doc.floatPaths.forEach(function (fp) {
+          if (fp.indexOf(slotPrefix) === 0) { toDrop.push(fp); }
+        });
+        for (var di = 0; di < toDrop.length; di++) {
+          session.doc.floatPaths.delete(toDrop[di]);
+        }
+      }
+    }
     session.dirty = true;
     syncDerived(session);
     return okMsg({ slot: found.slotKey });
@@ -728,19 +1184,57 @@
 
   function toggleIdInList(session, fieldName, id, add) {
     if (!session || !session.root) { return failMsg('세션이 없습니다.'); }
-    if (LIST_FIELDS.indexOf(fieldName) === -1) {
+    var schema = FIELD_SCHEMAS[fieldName];
+    if (!schema) {
       return failMsg('알 수 없는 목록 항목입니다: ' + fieldName);
     }
     var n = toInt(id, null);
     if (n === null) { return failMsg('번호는 정수여야 합니다.'); }
-    var list = ensureArr(session.player, fieldName);
-    var pos = -1;
-    for (var i = 0; i < list.length; i++) {
-      if (toInt(list[i], NaN) === n) { pos = i; break; }
+    var player = session.player;
+    var currentIds = getFieldIds(session, fieldName);
+    var hasIt = currentIds.indexOf(n) !== -1;
+    var want = typeof add === 'boolean' ? add : !hasIt;
+
+    if (schema.type === 'dict_list') {
+      var dl = decodeDictList(player[fieldName]);
+      if (want) {
+        if (!hasIt) {
+          var bk = spellBucketKey(n);
+          if (!dl[bk]) { dl[bk] = []; }
+          dl[bk].push(n);
+        }
+      } else {
+        var dlKeys = Object.keys(dl);
+        for (var i = 0; i < dlKeys.length; i++) {
+          var dk = dlKeys[i];
+          var filtered = [];
+          for (var j = 0; j < dl[dk].length; j++) {
+            if (dl[dk][j] !== n) { filtered.push(dl[dk][j]); }
+          }
+          if (filtered.length > 0) { dl[dk] = filtered; }
+          else { delete dl[dk]; }
+        }
+      }
+      player[fieldName] = encodeField(dl);
+    } else if (schema.type === 'dict_val') {
+      var dv = decodeDictVal(player[fieldName], fieldName);
+      var slotKey = fieldName === 'qgactive' ? qinggongGroupKey(n) : stuntSlotKey(n);
+      if (want) {
+        dv[slotKey] = n;
+      } else {
+        var dvKeys = Object.keys(dv);
+        for (var v = 0; v < dvKeys.length; v++) {
+          if (dv[dvKeys[v]] === n) { delete dv[dvKeys[v]]; }
+        }
+      }
+      player[fieldName] = encodeField(dv);
+    } else {
+      var list = decodeListField(player[fieldName]);
+      var pos = list.indexOf(n);
+      if (want && pos === -1) { list.push(n); }
+      else if (!want && pos !== -1) { list.splice(pos, 1); }
+      player[fieldName] = encodeField(list);
     }
-    var want = typeof add === 'boolean' ? add : (pos === -1);
-    if (want && pos === -1) { list.push(n); }
-    else if (!want && pos !== -1) { list.splice(pos, 1); }
     session.dirty = true;
     syncDerived(session);
     return okMsg({ active: want });
@@ -860,30 +1354,48 @@
     });
   }
 
-  function flatten(node, prefix, out) {
+  function flatten(node, prefix, out, rawBigInts, rawPath) {
     if (isObj(node)) {
       var keys = Object.keys(node);
       if (keys.length === 0 && prefix) { out[prefix] = {}; return; }
       for (var i = 0; i < keys.length; i++) {
-        flatten(node[keys[i]], prefix ? (prefix + '/' + keys[i]) : keys[i], out);
+        var k = keys[i];
+        var v = node[k];
+        var nextPrefix = prefix ? (prefix + '/' + k) : k;
+        var nextRaw = rawPath ? (rawPath + '\x1f' + k) : k;
+        if (typeof v === 'string' && (k === 'm_valueBase' || hasOwn(FIELD_SCHEMAS, k))) {
+          var decoded = decodeField(v);
+          if (decoded && typeof decoded === 'object') {
+            flatten(decoded, nextPrefix, out, null, '');
+            continue;
+          }
+        }
+        flatten(v, nextPrefix, out, rawBigInts, nextRaw);
       }
       return;
     }
     if (isArr(node)) {
       if (node.length === 0 && prefix) { out[prefix] = []; return; }
       for (var j = 0; j < node.length; j++) {
-        flatten(node[j], prefix + '/' + j, out);
+        var arrRaw = rawPath ? (rawPath + '\x1f' + j) : String(j);
+        flatten(node[j], prefix + '/' + j, out, rawBigInts, arrRaw);
       }
       return;
     }
-    if (prefix) { out[prefix] = node; }
+    if (prefix) {
+      if (typeof node === 'number' && rawBigInts instanceof Map && rawPath && rawBigInts.has(rawPath)) {
+        out[prefix] = rawBigInts.get(rawPath);
+      } else {
+        out[prefix] = node;
+      }
+    }
   }
 
   function computeDiff(session) {
     if (!session || !session.originalRoot) { return []; }
     var before = {}, after = {};
-    flatten(session.originalRoot, '', before);
-    flatten(session.root, '', after);
+    flatten(session.originalRoot, '', before, session.originalRawBigInts || null, '');
+    flatten(session.root, '', after, session.doc && session.doc.rawBigInts ? session.doc.rawBigInts : null, '');
     var changes = [], seen = {};
     var bkeys = Object.keys(before);
     for (var i = 0; i < bkeys.length; i++) {
@@ -912,6 +1424,7 @@
 
   function exportSave(session, opts) {
     if (!session || !session.root) { throw new Error('세션이 없습니다.'); }
+    normalizeWritePropertyJsonRoot(session.root);
     syncDerived(session);
     var o = isObj(opts) ? opts : {};
     if (o.validate !== false) {
@@ -942,7 +1455,7 @@
       var content = readItemContent(entities[i]);
       if (content) { totalCount += Object.keys(content).length; }
     }
-    var vbase = (isObj(player) && isObj(player.m_valueBase)) ? player.m_valueBase : {};
+    var vbase = readValueBase(player);
     var v = validate(session);
     var jingjie = readJingjieLevel(session);
     var diff = toInt(rootObj.m_GameDiff, 1);
@@ -967,7 +1480,7 @@
       },
       itemCount: playerCount,
       totalItemCount: totalCount,
-      itemIdGenerator: toInt(rootObj.m_ItemIdGenerator, 0),
+      itemIdGenerator: rootObj.m_ItemIdGenerator !== undefined ? rootObj.m_ItemIdGenerator : 0,
       companionCount: isObj(rootObj.Entitys) ? Object.keys(rootObj.Entitys).length : 0,
       core: {
         hp: toInt(vbase['0'], 0),
@@ -985,12 +1498,15 @@
   function commitSnapshot(session) {
     if (!session || !session.root) { return failMsg('세션이 없습니다.'); }
     session.originalRoot = clone(session.root);
+    session.originalRawBigInts = (session.doc && session.doc.rawBigInts instanceof Map)
+      ? new Map(session.doc.rawBigInts) : new Map();
+    session.needsRepair = false;
     session.dirty = false;
     return okMsg();
   }
 
   return {
-    VERSION: '1.0.2',
+    VERSION: '1.0.3',
     ATTR_COUNT: ATTR_COUNT,
     INT_MIN: INT_MIN,
     INT32_MIN: INT32_MIN,
@@ -1008,12 +1524,16 @@
     GAME_DIFF_LABELS: GAME_DIFF_LABELS,
     LIST_FIELDS: LIST_FIELDS,
     LIST_FIELD_LABELS: LIST_FIELD_LABELS,
+    FIELD_SCHEMAS: FIELD_SCHEMAS,
     PRESETS: PRESETS,
     createSession: createSession,
     syncDerived: syncDerived,
     validate: validate,
     setSummary: setSummary,
     setAttribute: setAttribute,
+    getAttributes: getAttributes,
+    getFieldIds: getFieldIds,
+    normalizeWritePropertyJsonRoot: normalizeWritePropertyJsonRoot,
     addItem: addItem,
     updateItem: updateItem,
     removeItem: removeItem,

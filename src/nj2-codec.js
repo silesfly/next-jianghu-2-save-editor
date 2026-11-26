@@ -221,21 +221,335 @@
       throw new Error('Nj2Codec: save missing playerentity object');
     }
 
+    var numMeta = scanJsonNumberMetadata(text);
     return {
       root: doc,
       rawText: text,
       hasBom: hasBom,
-      prettyPrint: true
+      prettyPrint: text.indexOf('\n') !== -1,
+      floatPaths: numMeta.floatPaths,
+      rawBigInts: numMeta.rawBigInts
     };
   }
 
+  function _nj2PathJoin(parent, key) {
+    var k = String(key);
+    if (parent === '') return k;
+    return parent + '\x1f' + k;
+  }
+
+  function _nj2ReadString(text, i, n) {
+    i++;
+    var out = '';
+    var start = i;
+    while (i < n) {
+      var c = text.charCodeAt(i);
+      if (c === 0x22) {
+        out += text.slice(start, i);
+        return { value: out, end: i + 1 };
+      }
+      if (c === 0x5c) {
+        out += text.slice(start, i);
+        i++;
+        if (i >= n) break;
+        var e = text.charAt(i);
+        switch (e) {
+          case '"': out += '"'; break;
+          case '\\': out += '\\'; break;
+          case '/': out += '/'; break;
+          case 'b': out += '\b'; break;
+          case 'f': out += '\f'; break;
+          case 'n': out += '\n'; break;
+          case 'r': out += '\r'; break;
+          case 't': out += '\t'; break;
+          case 'u':
+            out += String.fromCharCode(parseInt(text.slice(i + 1, i + 5), 16) || 0);
+            i += 4;
+            break;
+          default: out += e; break;
+        }
+        i++;
+        start = i;
+        continue;
+      }
+      i++;
+    }
+    out += text.slice(start, i);
+    return { value: out, end: i };
+  }
+
+  function _nj2RecordNumber(raw, path, floatPaths, rawBigInts) {
+    if (!raw) return;
+    var c0 = raw.charCodeAt(0);
+    if (c0 !== 0x2d && (c0 < 0x30 || c0 > 0x39)) return;
+    var isFloat = false;
+    var len = raw.length;
+    for (var k = 0; k < len; k++) {
+      var cc = raw.charCodeAt(k);
+      if (cc === 0x2e || cc === 0x65 || cc === 0x45) {
+        isFloat = true;
+        break;
+      }
+    }
+    if (isFloat) {
+      floatPaths.add(path);
+      return;
+    }
+    if (len >= 16) {
+      var asNum = Number(raw);
+      if (String(asNum) !== raw) {
+        rawBigInts.set(path, raw);
+      }
+    }
+  }
+
+  function scanJsonNumberMetadata(text) {
+    var floatPaths = new Set();
+    var rawBigInts = new Map();
+    if (typeof text !== 'string') return { floatPaths: floatPaths, rawBigInts: rawBigInts };
+
+    var n = text.length;
+    var i = 0;
+    if (n > 0 && text.charCodeAt(0) === 0xFEFF) i = 1;
+    var stack = [];
+
+    function currentValuePath() {
+      var top = stack.length ? stack[stack.length - 1] : null;
+      if (!top) return '';
+      if (top.isObj) return _nj2PathJoin(top.path, top.key);
+      return _nj2PathJoin(top.path, top.idx);
+    }
+
+    function afterValue() {
+      var top = stack.length ? stack[stack.length - 1] : null;
+      if (!top) return;
+      if (top.isObj) {
+        top.awaiting = 'comma';
+      } else {
+        top.idx++;
+        top.awaiting = 'comma';
+      }
+    }
+
+    while (i < n) {
+      var c = text.charCodeAt(i);
+      if (c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0D) { i++; continue; }
+      var top = stack.length ? stack[stack.length - 1] : null;
+
+      if (c === 0x7D) {
+        if (top && top.isObj) stack.pop();
+        i++;
+        afterValue();
+        continue;
+      }
+      if (c === 0x5D) {
+        if (top && !top.isObj) stack.pop();
+        i++;
+        afterValue();
+        continue;
+      }
+      if (c === 0x2C) {
+        if (top) top.awaiting = top.isObj ? 'key' : 'value';
+        i++;
+        continue;
+      }
+      if (c === 0x3A) {
+        if (top) top.awaiting = 'value';
+        i++;
+        continue;
+      }
+      if (top && top.isObj && top.awaiting === 'key') {
+        if (c === 0x22) {
+          var kr = _nj2ReadString(text, i, n);
+          top.key = kr.value;
+          top.awaiting = 'colon';
+          i = kr.end;
+          continue;
+        }
+        break;
+      }
+      if (c === 0x7B) {
+        stack.push({ isObj: true, path: currentValuePath(), awaiting: 'key', key: null, idx: 0 });
+        i++;
+        continue;
+      }
+      if (c === 0x5B) {
+        stack.push({ isObj: false, path: currentValuePath(), awaiting: 'value', key: null, idx: 0 });
+        i++;
+        continue;
+      }
+      if (c === 0x22) {
+        var sr = _nj2ReadString(text, i, n);
+        i = sr.end;
+        afterValue();
+        continue;
+      }
+
+      var j = i;
+      while (j < n) {
+        var cc = text.charCodeAt(j);
+        if (cc === 0x2C || cc === 0x7D || cc === 0x5D ||
+            cc === 0x20 || cc === 0x09 || cc === 0x0A || cc === 0x0D) break;
+        j++;
+      }
+      if (j === i) { i++; continue; }
+      var raw = text.slice(i, j);
+      var rc0 = raw.charCodeAt(0);
+      if (rc0 === 0x2d || (rc0 >= 0x30 && rc0 <= 0x39)) {
+        _nj2RecordNumber(raw, currentValuePath(), floatPaths, rawBigInts);
+      }
+      i = j;
+      afterValue();
+    }
+
+    return { floatPaths: floatPaths, rawBigInts: rawBigInts };
+  }
+
+  function isKnownDoubleField(path, key) {
+    if (key === 'm_DaTiTime') {
+      var dsegs = path.split('\x1f');
+      if (dsegs.length === 3 && (dsegs[0] === 'Entitys' || dsegs[0] === 'playerentity') && dsegs[2] === 'm_DaTiTime') {
+        return true;
+      }
+      return false;
+    }
+    if (key === '4') {
+      var segs = path.split('\x1f');
+      var L = segs.length;
+      if (L >= 4 && segs[L - 4] === 'itemStorage' && segs[L - 3] === 'content' && segs[L - 1] === '4') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function stringifyLitJson(root, meta) {
+    meta = meta || {};
+    var floatPaths = meta.floatPaths || new Set();
+    var rawBigInts = meta.rawBigInts || new Map();
+    var pretty = !!meta.pretty;
+    var indent = (typeof meta.indent === 'string' && meta.indent.length)
+      ? meta.indent : (pretty ? '  ' : '');
+    var trailingNewline = !!meta.trailingNewline;
+    var parts = [];
+
+    function appendIndent(depth) {
+      if (!pretty) return;
+      for (var d = 0; d < depth; d++) parts.push(indent);
+    }
+
+    function writeValue(val, path, key, depth) {
+      if (val === null || val === undefined) {
+        parts.push('null');
+        return;
+      }
+      var t = typeof val;
+      if (t === 'string') {
+        parts.push(JSON.stringify(val));
+        return;
+      }
+      if (t === 'boolean') {
+        parts.push(val ? 'true' : 'false');
+        return;
+      }
+      if (t === 'number') {
+        if (!isFinite(val)) {
+          parts.push((floatPaths.has(path) || isKnownDoubleField(path, key)) ? '0.0' : '0');
+          return;
+        }
+        if (rawBigInts.has(path)) {
+          var raw = rawBigInts.get(path);
+          if (Number(raw) === val) {
+            parts.push(raw);
+            return;
+          }
+        }
+        var s = String(val);
+        if ((floatPaths.has(path) || isKnownDoubleField(path, key)) &&
+            s.indexOf('.') === -1 && s.indexOf('e') === -1 && s.indexOf('E') === -1) {
+          parts.push(s + '.0');
+          return;
+        }
+        parts.push(s);
+        return;
+      }
+      if (t === 'bigint') {
+        parts.push(val.toString());
+        return;
+      }
+      if (Object.prototype.toString.call(val) === '[object Array]') {
+        if (val.length === 0) { parts.push('[]'); return; }
+        parts.push('[');
+        var n = val.length;
+        for (var a = 0; a < n; a++) {
+          if (a > 0) parts.push(',');
+          if (pretty) { parts.push('\n'); appendIndent(depth + 1); }
+          var cval = val[a];
+          if (cval === undefined) {
+            parts.push('null');
+          } else {
+            writeValue(cval, _nj2PathJoin(path, a), String(a), depth + 1);
+          }
+        }
+        if (pretty) { parts.push('\n'); appendIndent(depth); }
+        parts.push(']');
+        return;
+      }
+      var keys = Object.keys(val);
+      var first = true;
+      parts.push('{');
+      for (var k = 0; k < keys.length; k++) {
+        var kk = keys[k];
+        var vv = val[kk];
+        if (vv === undefined) continue;
+        if (!first) parts.push(',');
+        first = false;
+        if (pretty) { parts.push('\n'); appendIndent(depth + 1); }
+        parts.push(JSON.stringify(kk));
+        parts.push(pretty ? ': ' : ':');
+        writeValue(vv, _nj2PathJoin(path, kk), kk, depth + 1);
+      }
+      if (!first && pretty) { parts.push('\n'); appendIndent(depth); }
+      parts.push('}');
+    }
+
+    writeValue(root, '', null, 0);
+    var out = parts.join('');
+    if (trailingNewline) out += '\n';
+    return out;
+  }
+
+  function decodeJsonField(val) {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'string') {
+      var s = val.trim();
+      if (!s) return null;
+      try {
+        return JSON.parse(s);
+      } catch (e) {
+        return null;
+      }
+    }
+    if (typeof val === 'object') return val;
+    return null;
+  }
+
+  function encodeJsonField(val) {
+    if (val === undefined) return 'null';
+    return JSON.stringify(val);
+  }
+
   function detectPrettyStyle(rawText) {
-    if (!rawText) return { pretty: true, indent: '  ' };
-    var tabMatch = rawText.match(/^\t+/m);
-    var spaceMatch = rawText.match(/^ {2,}/m);
-    if (tabMatch) return { pretty: true, indent: '\t' };
-    if (spaceMatch) return { pretty: true, indent: spaceMatch[0].slice(0, 2) };
-    return { pretty: true, indent: '  ' };
+    if (!rawText) return { pretty: true, indent: '  ', trailingNewline: false };
+    var trailingNewline = rawText.charAt(rawText.length - 1) === '\n';
+    if (rawText.indexOf('\n') === -1) {
+      return { pretty: false, indent: '', trailingNewline: false };
+    }
+    var indentMatch = rawText.match(/\r?\n([ \t]+)"/);
+    if (indentMatch) {
+      return { pretty: true, indent: indentMatch[1], trailingNewline: trailingNewline };
+    }
+    return { pretty: true, indent: '  ', trailingNewline: trailingNewline };
   }
 
   function serializeSaveJson(doc, opts) {
@@ -247,11 +561,18 @@
     var style = opts.style || detectPrettyStyle(doc && doc.rawText);
     var pretty = opts.pretty !== undefined ? !!opts.pretty : style.pretty;
     var indent = opts.indent !== undefined ? opts.indent : style.indent;
+    var trailingNewline = opts.trailingNewline !== undefined ? !!opts.trailingNewline : !!style.trailingNewline;
     var hasBom = opts.hasBom !== undefined ? !!opts.hasBom : !!(doc && doc.hasBom);
+    var floatPaths = opts.floatPaths || (doc && doc.floatPaths) || new Set();
+    var rawBigInts = opts.rawBigInts || (doc && doc.rawBigInts) || new Map();
 
-    var text = pretty
-      ? JSON.stringify(target, null, indent)
-      : JSON.stringify(target);
+    var text = stringifyLitJson(target, {
+      floatPaths: floatPaths,
+      rawBigInts: rawBigInts,
+      pretty: pretty,
+      indent: indent,
+      trailingNewline: trailingNewline
+    });
 
     if (hasBom) text = '\uFEFF' + text;
     if (opts.asString) return text;
@@ -296,37 +617,53 @@
           savePosx: '1118.3',
           savePosy: '365.6',
           savePosz: '1490.5',
-          m_valueBase: {
+          m_valueBase: encodeJsonField({
             '0': 4500, '1': 3200, '2': 4500, '3': 3200, '4': 120, '5': 85,
             '6': 90, '7': 88, '8': 82, '9': 80, '10': 84, '11': 78, '12': 75,
             '20': 480, '21': 450, '22': 360, '23': 340, '34': 120, '35': 260,
             '36': 150, '37': 180, '66': 500, '67': 60, '68': 50000, '69': 18000,
             '70': 6000, '71': 50, '72': 15, '73': 95, '74': 120, '75': 110, '76': 25
-          },
+          }),
           gongliRate: 100,
           itemStorage: {
             count: 120,
             content: {
               '12': { '0': 900001, '1': 1001, '2': 3, '9': 10, '10': 1 },
-              '13': { '0': 900002, '1': 1002, '9': 11, '10': 1 },
+              '13': { '0': 900002, '1': 1002, '4': 1.0, '9': 11, '10': 1 },
               '14': { '0': 900003, '1': 1003, '2': 2, '9': 12, '10': 1 }
             }
           },
-          m_learntSpell: [3, 4],
+          m_learntSpell: encodeJsonField({ '0': [3, 4] }),
           curTaolu: 1,
-          m_CurTaoLuZu: {},
-          equipedSpellIdList: {},
-          mijiIdList: [10000],
-          m_StuntIds: [3400, 3401],
-          m_EquipedStuntIds: [3400],
-          talents: [1, 2],
-          m_MenPaiTalentList: [],
-          learnedpeifang: [1001, 1002],
-          m2: {}, m3: [], m4: {}, m5: {},
-          m8: [100, 101], m9: [], attriPointUseDict: {},
-          j0: {}, j1: {}, j2: {}, j3: {}, j4: {}, j5: {}, j6: {},
-          jingJieNodeBuff: {}, qgactive: [], qgword: {}, lzactive: [], lzequip: {},
-          m_AchievementList: [1, 2],
+          m_CurTaoLuZu: encodeJsonField({}),
+          equipedSpellIdList: encodeJsonField({}),
+          mijiIdList: encodeJsonField([10000]),
+          m_StuntIds: encodeJsonField([3400, 3401]),
+          m_EquipedStuntIds: encodeJsonField({ '34': 3400 }),
+          talents: encodeJsonField([1, 2]),
+          m_MenPaiTalentList: encodeJsonField([]),
+          learnedpeifang: encodeJsonField([1001, 1002]),
+          m0: encodeJsonField([10000, 10010]),
+          m2: encodeJsonField({}),
+          m3: encodeJsonField([]),
+          m4: encodeJsonField({}),
+          m5: encodeJsonField({}),
+          m8: encodeJsonField([1]),
+          m9: encodeJsonField([]),
+          attriPointUseDict: encodeJsonField({}),
+          j0: encodeJsonField([]),
+          j1: encodeJsonField({}),
+          j2: encodeJsonField([]),
+          j3: encodeJsonField({}),
+          j4: encodeJsonField({}),
+          j5: encodeJsonField({}),
+          j6: encodeJsonField([]),
+          jingJieNodeBuff: encodeJsonField({}),
+          qgactive: encodeJsonField({ '101': 1010 }),
+          qgword: encodeJsonField({}),
+          lzactive: encodeJsonField({}),
+          lzequip: encodeJsonField({}),
+          m_AchievementList: encodeJsonField([1, 2]),
           m_Team: {
             m_MainPlayers: [1],
             m_NormalPlayers: [],
@@ -346,10 +683,11 @@
           proBaseId: 2,
           titleId: 0,
           sectid: 2,
-          m_valueBase: {
+          m_DaTiTime: 0.0,
+          m_valueBase: encodeJsonField({
             '0': 3800, '1': 2800, '4': 95, '5': 80,
             '20': 390, '21': 410, '22': 310, '23': 320, '68': 1200
-          },
+          }),
           gongliRate: 100,
           itemStorage: {
             count: 48,
@@ -357,12 +695,12 @@
               '0': { '0': 900004, '1': 1001, '9': 10, '10': 1 }
             }
           },
-          m_learntSpell: [3],
+          m_learntSpell: encodeJsonField({ '0': [3] }),
           curTaolu: 1
         }
       },
-      allentityids: [1, 2],
-      npcGuidProidDic: { '2': 2 },
+      allentityids: encodeJsonField([1, 2]),
+      npcGuidProidDic: encodeJsonField({ '2': 2 }),
       m_TeamInfo: {},
       m_PlayerMemeberScrInfos: {}
     };
@@ -389,6 +727,10 @@
     encodeCompanionHeader: encodeCompanionHeader,
     parseSaveJson: parseSaveJson,
     serializeSaveJson: serializeSaveJson,
+    scanJsonNumberMetadata: scanJsonNumberMetadata,
+    stringifyLitJson: stringifyLitJson,
+    decodeJsonField: decodeJsonField,
+    encodeJsonField: encodeJsonField,
     createDemoSave: createDemoSave,
     utf8Encode: utf8Encode,
     utf8Decode: utf8Decode

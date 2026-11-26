@@ -208,8 +208,9 @@
       return null;
     }
     const demo = CODEC.createDemoSave();
-    const jsonText = JSON.stringify(demo.saveJson, null, 2);
-    const jsonBytes = new TextEncoder().encode(jsonText);
+    const jsonBytes = typeof CODEC.serializeSaveJson === 'function'
+      ? toBytes(CODEC.serializeSaveJson(demo.saveJson, { pretty: true, indent: '  ' }))
+      : new TextEncoder().encode(JSON.stringify(demo.saveJson, null, 2));
     const headerBytes = toBytes(demo.headerBytes);
     state.currentPath = null;
     state.serverSha = '';
@@ -295,6 +296,16 @@
   }
 
   async function loadServerSlot(path) {
+    if (state.isWebView2 && !state.token) {
+      try {
+        setStatus('불러오는 중...', 'busy');
+        window.chrome.webview.postMessage({ type: 'load', path });
+      } catch (err) {
+        setStatus('불러오기 오류', 'error');
+        showToast('슬롯 불러오기 실패: ' + (err && err.message ? err.message : String(err)), 'error');
+      }
+      return;
+    }
     try {
       setStatus('불러오는 중...', 'busy');
       const data = await serverFetch('/api/load', { method: 'POST', body: JSON.stringify({ path }) });
@@ -343,6 +354,7 @@
         type: 'save',
         path: state.currentPath,
         jsonBase64: payload.jsonBase64,
+        dataBase64: payload.jsonBase64,
         headerBase64: payload.headerBase64,
         expectedSha256: state.serverSha || '',
       });
@@ -394,7 +406,8 @@
     if (payload.type === 'slots') {
       renderSlotOptions(Array.isArray(payload.slots) ? payload.slots : []);
     } else if (payload.type === 'loaded') {
-      const jsonBytes = payload.jsonBase64 ? base64ToBytes(payload.jsonBase64) : toBytes(payload.jsonText || '');
+      const b64 = payload.jsonBase64 || payload.dataBase64 || '';
+      const jsonBytes = b64 ? base64ToBytes(b64) : toBytes(payload.jsonText || '');
       const headerBytes = payload.headerBase64 ? base64ToBytes(payload.headerBase64) : null;
       state.serverSha = payload.sha256 || '';
       loadFromBytes(jsonBytes, headerBytes, {
@@ -598,8 +611,7 @@
     const host = $('stat-quick-cards');
     if (!host) return;
     clear(host);
-    const player = state.session.player || {};
-    const base = player.m_valueBase || {};
+    const base = CORE.getAttributes(state.session) || {};
     for (const q of QUICK_ATTRS) {
       const cur = base[String(q.idx)] != null ? base[String(q.idx)] : 0;
       const wrap = el('div', { className: 'quick-card' }, [
@@ -667,8 +679,7 @@
       if (empty) empty.classList.remove('hidden');
       return;
     }
-    const player = state.session.player || {};
-    const base = player.m_valueBase || {};
+    const base = CORE.getAttributes(state.session) || {};
     const catByIdx = attrCatMap();
     const search = (state.statSearch || '').trim().toLowerCase();
     let shown = 0;
@@ -729,6 +740,10 @@
   };
 
   function getPlayerList(field) {
+    if (!state.session) return [];
+    if (typeof CORE.getFieldIds === 'function') {
+      return CORE.getFieldIds(state.session, field);
+    }
     const player = (state.session && state.session.player) || {};
     const v = player[field];
     return Array.isArray(v) ? v.slice() : [];
@@ -1010,38 +1025,41 @@
       }
     }
 
-    renderNodeGrid('m8', 'm8-grid', 'count-m8', safeArray(CATALOG.jingmaiNodes), 'jingmai');
+    renderNodeGrid(['m0', 'm1'], 'm8-grid', 'count-m8', safeArray(CATALOG.jingmaiNodes), 'jingmai');
     renderNodeGrid('qgactive', 'qg-grid', 'count-qg', safeArray(CATALOG.qinggongNodes), 'qg');
     renderAchievements();
   }
 
-  function renderNodeGrid(field, gridId, countId, catalogNodes, kind) {
+  function renderNodeGrid(fieldSpec, gridId, countId, catalogNodes, kind) {
     const grid = $(gridId);
     const countPill = $(countId);
     if (!grid) return;
     clear(grid);
-    const activeList = getPlayerList(field);
-    const activeSet = new Set(activeList.map(Number));
+    const fields = Array.isArray(fieldSpec) ? fieldSpec : [fieldSpec];
+    const activeByField = {};
+    for (const f of fields) activeByField[f] = new Set(getPlayerList(f).map(Number));
 
     const nodes = [];
     const seen = new Set();
     for (const row of catalogNodes) {
-      const id = row.nodeId != null ? row.nodeId : row.id;
-      if (id == null || seen.has(Number(id))) continue;
-      seen.add(Number(id));
-      nodes.push({ id: Number(id), name: row.name || ('노드 #' + id) });
+      const id = row.id != null ? Number(row.id) : (row.nodeId != null ? Number(row.nodeId) : null);
+      if (id == null || seen.has(id)) continue;
+      seen.add(id);
+      const targetField = fields.length > 1 ? (row.type === 2 ? fields[1] : fields[0]) : fields[0];
+      nodes.push({ id, field: targetField, name: row.name || ('노드 #' + id) });
     }
-    for (const id of activeList) {
-      const n = Number(id);
-      if (!seen.has(n)) {
-        seen.add(n);
-        nodes.push({ id: n, name: lookupNameSafe(kind, n) || ('노드 #' + n) });
+    for (const f of fields) {
+      for (const id of activeByField[f]) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          nodes.push({ id, field: f, name: lookupNameSafe(kind, id) || ('노드 #' + id) });
+        }
       }
     }
 
     let activeCount = 0;
     for (const n of nodes) {
-      const on = activeSet.has(n.id);
+      const on = activeByField[n.field].has(n.id);
       if (on) activeCount++;
       grid.appendChild(el('button', {
         type: 'button',
@@ -1050,7 +1068,7 @@
         attrs: { 'aria-pressed': on ? 'true' : 'false' },
         on: {
           click: () => {
-            const r = CORE.toggleIdInList(state.session, field, n.id, !on);
+            const r = CORE.toggleIdInList(state.session, n.field, n.id, !on);
             if (!r || !r.ok) showToast('토글 실패', 'error');
             else { renderGraphs(); refreshDirtyBadge(); }
           },
@@ -1144,7 +1162,7 @@
       detail.appendChild(el('div', { className: 'empty', text: '동료를 선택해 주세요.' }));
       return;
     }
-    const vb = c.m_valueBase || {};
+    const vb = CORE.getAttributes(state.session, guid) || {};
     const invCount = (c.itemStorage && c.itemStorage.content) ? Object.keys(c.itemStorage.content).length : 0;
     const rows = [
       ['엔티티 GUID', guid],
@@ -1343,7 +1361,7 @@
     if (exp) exp.addEventListener('click', () => {
       try {
         const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
-        downloadBytes('NextJianghu2SaveEditor-v1.0.2.html', new TextEncoder().encode(html), 'text/html;charset=utf-8');
+        downloadBytes('NextJianghu2SaveEditor-v1.0.3.html', new TextEncoder().encode(html), 'text/html;charset=utf-8');
         showToast('현재 에디터 HTML을 내보냈습니다.', 'ok');
       } catch (err) {
         showToast('HTML 내보내기 실패: ' + (err && err.message ? err.message : String(err)), 'error');

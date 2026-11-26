@@ -116,10 +116,11 @@ test('setSummary mutates fields and syncDerived updates player & companionMeta',
 test('setAttribute enforces bounds and permits negative values only for attr 71', () => {
   const session = core.createSession(demoJsonStr, demo.headerBytes);
   assert.strictEqual(core.setAttribute(session, 68, 555555).ok, true);
-  assert.strictEqual(session.player.m_valueBase['68'], 555555);
+  assert.strictEqual(typeof session.player.m_valueBase, 'string');
+  assert.strictEqual(core.getAttributes(session)['68'], 555555);
   assert.strictEqual(core.setAttribute(session, 68, -1).ok, false);
   assert.strictEqual(core.setAttribute(session, 71, -50000).ok, true);
-  assert.strictEqual(session.player.m_valueBase['71'], -50000);
+  assert.strictEqual(core.getAttributes(session)['71'], -50000);
   assert.strictEqual(core.setAttribute(session, 71, -1000000).ok, false);
 });
 
@@ -144,9 +145,10 @@ test('addItem / updateItem / removeItem allocate bag slot >= 12 and keep storage
   assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['2'], 9);
   assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['7'], 7);
 
-  const updBySlot = core.updateItem(session, added.uid, { count: 1 }, { slot: String(added.slot) });
+  const updBySlot = core.updateItem(session, added.uid, { count: 1, intensify: 0 }, { slot: String(added.slot) });
   assert.strictEqual(updBySlot.ok, true);
-  assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['2'], 1);
+  assert.strictEqual('2' in session.player.itemStorage.content[String(added.slot)], false);
+  assert.strictEqual('7' in session.player.itemStorage.content[String(added.slot)], false);
 
   const rem = core.removeItem(session, added.uid);
   assert.strictEqual(rem.ok, true);
@@ -166,8 +168,10 @@ test('real-save shape with omitted qty key 2, capacity 200, missing NPC storage,
       '14': { '0': 500003, '1': 1003, '9': 12, '10': 1 },
     },
   };
-  realLike.playerentity['1'].m_valueBase['67'] = -15;
-  realLike.playerentity['1'].m_valueBase['1020'] = -30;
+  const vb = JSON.parse(realLike.playerentity['1'].m_valueBase);
+  vb['67'] = -15;
+  vb['1020'] = -30;
+  realLike.playerentity['1'].m_valueBase = JSON.stringify(vb);
   realLike.Entitys['2'].itemStorage = {
     count: 48,
     content: {
@@ -175,7 +179,7 @@ test('real-save shape with omitted qty key 2, capacity 200, missing NPC storage,
       '1': { '0': 600002, '1': 1002 },
     },
   };
-  realLike.Entitys['3'] = { guid: 3, type: 2, isActive: false, m_valueBase: { '0': 500 } };
+  realLike.Entitys['3'] = { guid: 3, type: 2, isActive: false, m_valueBase: JSON.stringify({ '0': 500 }) };
 
   const session = core.createSession(JSON.stringify(realLike), demo.headerBytes);
   const rep = core.validate(session);
@@ -188,24 +192,245 @@ test('real-save shape with omitted qty key 2, capacity 200, missing NPC storage,
   const exp = core.exportSave(session);
   const roundTripped = JSON.parse(Buffer.from(exp.jsonBytes).toString('utf8'));
   assert.strictEqual(roundTripped.playerentity['1'].itemStorage.count, 200);
-  assert.strictEqual(roundTripped.playerentity['1'].m_valueBase['67'], -15);
-  assert.strictEqual(roundTripped.playerentity['1'].m_valueBase['1020'], -30);
+  assert.strictEqual(typeof roundTripped.playerentity['1'].m_valueBase, 'string');
+  const rtVb = JSON.parse(roundTripped.playerentity['1'].m_valueBase);
+  assert.strictEqual(rtVb['67'], -15);
+  assert.strictEqual(rtVb['1020'], -30);
   assert.strictEqual('2' in roundTripped.playerentity['1'].itemStorage.content['12'], false);
   assert.strictEqual('itemStorage' in roundTripped.Entitys['3'], false);
 });
 
 // 6. toggleIdInList across tracked lists
-test('toggleIdInList adds and removes IDs cleanly across all tracked lists', () => {
+test('toggleIdInList adds and removes IDs cleanly across all tracked WritePropertyJson fields', () => {
   const session = core.createSession(demoJsonStr, demo.headerBytes);
   for (const field of core.LIST_FIELDS) {
     const id = 424242;
     const on = core.toggleIdInList(session, field, id, true);
     assert.strictEqual(on.ok, true);
-    assert.ok(session.player[field].includes(id), field + ' should include ' + id);
+    assert.strictEqual(typeof session.player[field], 'string', field + ' must be JSON string');
+    assert.ok(core.getFieldIds(session, field).includes(id), field + ' should include ' + id);
     const off = core.toggleIdInList(session, field, id, false);
     assert.strictEqual(off.ok, true);
-    assert.ok(!session.player[field].includes(id), field + ' should not include ' + id);
+    assert.strictEqual(typeof session.player[field], 'string', field + ' must stay JSON string');
+    assert.ok(!core.getFieldIds(session, field).includes(id), field + ' should not include ' + id);
   }
+});
+
+// 6b. Real LitJson WritePropertyJson + float .0 + 64-bit integer + BOM round-trip regression
+test('real LitJson save preserves UTF-8 BOM, WritePropertyJson strings, float .0, 64-bit ints, and zero open diff', () => {
+  const saveText = '\uFEFF' + [
+    '{',
+    '    "posX": 100.0,',
+    '    "posZ": 0.0,',
+    '    "gameTime": 120.0,',
+    '    "m_ItemIdGenerator": 9007199254740993123,',
+    '    "playerentity": {',
+    '        "1": {',
+    '            "guid": 1,',
+    '            "name": "테스트협객",',
+    '            "m_valueBase": "{\\"0\\":4500,\\"68\\":50000,\\"999\\":42}",',
+    '            "m_learntSpell": "{\\"0\\":[3,4],\\"1\\":[500]}",',
+    '            "m_EquipedStuntIds": "{\\"34\\":3400}",',
+    '            "qgactive": "{\\"101\\":1010}",',
+    '            "m0": "[10000,10010]",',
+    '            "itemStorage": {',
+    '                "count": 120,',
+    '                "content": {',
+    '                    "12": { "0": 9007199254740993123, "1": 1001, "4": 1.0, "9": 10, "10": 1 }',
+    '                }',
+    '            }',
+    '        }',
+    '    },',
+    '    "Entitys": {',
+    '        "2": {',
+    '            "guid": 2,',
+    '            "m_DaTiTime": 0.0,',
+    '            "m_valueBase": "{\\"0\\":3000,\\"68\\":100}"',
+    '        }',
+    '    }',
+    '}'
+  ].join('\n');
+
+  const session = core.createSession(Buffer.from(saveText, 'utf8'));
+  assert.strictEqual(core.computeDiff(session).length, 0);
+  assert.strictEqual(core.getSummary(session).core.money, 50000);
+  assert.strictEqual(core.getAttributes(session)['999'], 42);
+
+  assert.strictEqual(core.setAttribute(session, 68, 999999).ok, true);
+  assert.strictEqual(core.toggleIdInList(session, 'm_learntSpell', 5, true).ok, true);
+  assert.strictEqual(core.toggleIdInList(session, 'm_EquipedStuntIds', 3401, true).ok, true);
+  assert.strictEqual(core.toggleIdInList(session, 'qgactive', 1020, true).ok, true);
+  assert.strictEqual(core.toggleIdInList(session, 'm0', 10020, true).ok, true);
+  const addRes = core.addItem(session, 1002, 1, { intensify: 0 });
+  assert.strictEqual(addRes.ok, true);
+
+  const exp = core.exportSave(session);
+  const bytes = Buffer.from(exp.jsonBytes);
+  assert.strictEqual(bytes[0], 0xef);
+  assert.strictEqual(bytes[1], 0xbb);
+  assert.strictEqual(bytes[2], 0xbf);
+
+  const text = bytes.toString('utf8');
+  const parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
+  const player = parsed.playerentity['1'];
+
+  assert.strictEqual(typeof player.m_valueBase, 'string');
+  const vb = JSON.parse(player.m_valueBase);
+  assert.strictEqual(vb['68'], 999999);
+  assert.strictEqual(vb['999'], 42);
+
+  assert.strictEqual(typeof player.m_learntSpell, 'string');
+  const learnt = JSON.parse(player.m_learntSpell);
+  assert.strictEqual(Array.isArray(learnt), false);
+  assert.ok(Array.isArray(learnt['0']) && learnt['0'].includes(5));
+  assert.ok(Array.isArray(learnt['1']) && learnt['1'].includes(500));
+
+  assert.strictEqual(typeof player.m_EquipedStuntIds, 'string');
+  const eqStunts = JSON.parse(player.m_EquipedStuntIds);
+  assert.strictEqual(Array.isArray(eqStunts), false);
+  assert.strictEqual(eqStunts['34'], 3401);
+
+  assert.strictEqual(typeof player.qgactive, 'string');
+  const qg = JSON.parse(player.qgactive);
+  assert.strictEqual(Array.isArray(qg), false);
+  assert.strictEqual(qg['101'], 1010);
+  assert.strictEqual(qg['102'], 1020);
+
+  assert.strictEqual(typeof player.m0, 'string');
+  assert.ok(JSON.parse(player.m0).includes(10020));
+
+  assert.match(text, /"4": 1\.0/);
+  assert.match(text, /"m_DaTiTime": 0\.0/);
+  assert.match(text, /"posX": 100\.0/);
+  assert.match(text, /9007199254740993123/);
+  // P0-1 regression: >2^53 UID addItem must emit UNQUOTED exact 64-bit integer and advance m_ItemIdGenerator
+  assert.strictEqual(addRes.uid, '9007199254740993124');
+  assert.match(text, /"0": 9007199254740993124\b/);
+  assert.match(text, /"m_ItemIdGenerator": 9007199254740993124\b/);
+  assert.doesNotMatch(text, /"9007199254740993124"/);
+
+  const addedRow = player.itemStorage.content[String(addRes.slot)];
+  assert.ok(addedRow);
+  assert.strictEqual('2' in addedRow, false);
+  assert.strictEqual('7' in addedRow, false);
+});
+
+// 6c. Auto-repair legacy v1.0.2 raw object/array fields into WritePropertyJson strings on export
+test('legacy v1.0.2 raw object/array WritePropertyJson fields warn, set needsRepair, and auto-repair on export', () => {
+  const legacyText = JSON.stringify({
+    playerentity: {
+      '1': {
+        m_valueBase: { '68': 100 },
+        mijiIdList: [10000],
+        m_learntSpell: [3, 4],
+        qgactive: [1010],
+        m9: []
+      }
+    }
+  }, null, 2);
+  const session = core.createSession(Buffer.from(legacyText, 'utf8'));
+  assert.strictEqual(session.needsRepair, true);
+  assert.strictEqual(session.dirty, true);
+  const preVal = core.validate(session);
+  assert.ok(preVal.warnings.some((w) => /backup/i.test(w)));
+  const exp = core.exportSave(session);
+  const parsed = JSON.parse(Buffer.from(exp.jsonBytes).toString('utf8'));
+  const p = parsed.playerentity['1'];
+  assert.strictEqual(typeof p.m_valueBase, 'string');
+  assert.deepStrictEqual(JSON.parse(p.m_valueBase), { '68': 100 });
+  assert.strictEqual(typeof p.mijiIdList, 'string');
+  assert.deepStrictEqual(JSON.parse(p.mijiIdList), [10000]);
+  assert.strictEqual(typeof p.m_learntSpell, 'string');
+  assert.strictEqual(Array.isArray(JSON.parse(p.m_learntSpell)), false);
+  assert.strictEqual(typeof p.qgactive, 'string');
+  assert.deepStrictEqual(JSON.parse(p.qgactive), { '101': 1010 });
+  assert.strictEqual(typeof p.m9, 'string');
+  assert.deepStrictEqual(JSON.parse(p.m9), []);
+});
+
+// 6e. Exact >2^53 UID lookup distinguishes adjacent rounded numbers & guards UInt64 max overflow
+test('exact >2^53 UID update/remove targets exact slot only and rejects UInt64 max overflow', () => {
+  const adjText = [
+    '{',
+    '  "m_ItemIdGenerator": 9007199254740993,',
+    '  "playerentity": {',
+    '    "1": {',
+    '      "m_valueBase": "{\\"68\\":100}",',
+    '      "itemStorage": {',
+    '        "count": 20,',
+    '        "content": {',
+    '          "12": { "0": 9007199254740993, "1": 1001, "9": 10, "10": 1 },',
+    '          "13": { "0": 9007199254740992, "1": 1002, "9": 10, "10": 1 }',
+    '        }',
+    '      }',
+    '    }',
+    '  }',
+    '}'
+  ].join('\n');
+  const s = core.createSession(Buffer.from(adjText, 'utf8'));
+  assert.strictEqual(core.updateItem(s, '9007199254740992', { count: 7 }).ok, true);
+  assert.strictEqual(s.player.itemStorage.content['12']['2'], undefined);
+  assert.strictEqual(s.player.itemStorage.content['13']['2'], 7);
+  assert.strictEqual(core.removeItem(s, '9007199254740992').ok, true);
+  assert.ok(s.player.itemStorage.content['12']);
+  assert.strictEqual(s.player.itemStorage.content['13'], undefined);
+  const out = Buffer.from(core.exportSave(s).jsonBytes).toString('utf8');
+  assert.match(out, /"0": 9007199254740993\b/);
+
+  // UInt64 max overflow rejected cleanly without mutating generator or inventory
+  const maxText = [
+    '{',
+    '  "m_ItemIdGenerator": 18446744073709551615,',
+    '  "playerentity": {',
+    '    "1": {',
+    '      "m_valueBase": "{\\"68\\":100}",',
+    '      "itemStorage": { "count": 20, "content": {} }',
+    '    }',
+    '  }',
+    '}'
+  ].join('\n');
+  const smax = core.createSession(Buffer.from(maxText, 'utf8'));
+  const overRes = core.addItem(smax, 1001, 1);
+  assert.strictEqual(overRes.ok, false);
+  assert.strictEqual(Object.keys(smax.player.itemStorage.content).length, 0);
+  const maxOut = Buffer.from(core.exportSave(smax).jsonBytes).toString('utf8');
+  assert.match(maxOut, /"m_ItemIdGenerator": 18446744073709551615\b/);
+  assert.doesNotMatch(maxOut, /18446744073709551616/);
+});
+
+// 6d. Validate rejects duplicate item UIDs and container-type mismatches; non-double integers stay integers
+test('validate catches duplicate item UIDs & container mismatches and preserves non-double integers', () => {
+  const dupText = JSON.stringify({
+    gameTime: 42,
+    playerentity: {
+      '1': {
+        m_valueBase: '{"68":100}',
+        m_learntSpell: '[1,2]',
+        itemStorage: {
+          count: 20,
+          content: {
+            '12': { '0': 555, '1': 1001, '9': 10, '10': 1 },
+            '13': { '0': 555, '1': 1002, '9': 10, '10': 1 }
+          }
+        }
+      }
+    }
+  }, null, 2);
+  const s = core.createSession(Buffer.from(dupText, 'utf8'));
+  const rep = core.validate(s);
+  assert.strictEqual(rep.ok, false);
+  assert.ok(rep.errors.some((e) => /중복된 아이템 고유 번호/.test(e)));
+  assert.ok(rep.errors.some((e) => /m_learntSpell.*Dictionary/.test(e)));
+
+  // Non-double integer gameTime must NOT be coerced to 42.0 (P2-1)
+  const cleanText = JSON.stringify({
+    gameTime: 42,
+    playerentity: { '1': { m_valueBase: '{"68":100}' } }
+  }, null, 2);
+  const s2 = core.createSession(Buffer.from(cleanText, 'utf8'));
+  const out2 = Buffer.from(core.exportSave(s2).jsonBytes).toString('utf8');
+  assert.match(out2, /"gameTime": 42\b/);
+  assert.doesNotMatch(out2, /"gameTime": 42\.0/);
 });
 
 // 7. All 6 presets pass validate & produce computeDiff

@@ -17,7 +17,7 @@ namespace NextJianghu2SaveEditor
 {
     internal static class Program
     {
-        public const string AppTitle = "\ud558\uc77c\ucc38\uac15\ud6382 \uc138\uc774\ube0c \uc5d0\ub514\ud130 v1.0.2";
+        public const string AppTitle = "\ud558\uc77c\ucc38\uac15\ud6382 \uc138\uc774\ube0c \uc5d0\ub514\ud130 v1.0.3";
         public const string VirtualHost = "nj2-editor.local";
 
         private const string HtmlResourceName = "NextJianghu2SaveEditor.html";
@@ -40,8 +40,8 @@ namespace NextJianghu2SaveEditor
                 _localAppDataBase = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "NextJianghu2SaveEditor");
-                _runtimeDir = Path.Combine(_localAppDataBase, "runtime-1.0.2");
-                _htmlDir = Path.Combine(_localAppDataBase, "html-1.0.2");
+                _runtimeDir = Path.Combine(_localAppDataBase, "runtime-1.0.3");
+                _htmlDir = Path.Combine(_localAppDataBase, "html-1.0.3");
                 _htmlFilePath = Path.Combine(_htmlDir, HtmlResourceName);
 
                 HookAssemblyResolver();
@@ -289,7 +289,7 @@ namespace NextJianghu2SaveEditor
             try
             {
                 string baseDir = Path.Combine(localAppData, "NextJianghu2SaveEditor");
-                string runtimeDir = Path.Combine(baseDir, "runtime-1.0.2");
+                string runtimeDir = Path.Combine(baseDir, "runtime-1.0.3");
                 Directory.CreateDirectory(runtimeDir);
                 string target = Path.Combine(runtimeDir, "WebView2Loader.dll");
 
@@ -1059,7 +1059,15 @@ namespace NextJianghu2SaveEditor
                 SaveStore.ValidateSaveBytes(diskBytes);
                 _validateOk = true;
 
-                string diskText = Encoding.UTF8.GetString(diskBytes);
+                int bomOffset = 0;
+                if (diskBytes.Length >= 3 &&
+                    diskBytes[0] == 0xEF &&
+                    diskBytes[1] == 0xBB &&
+                    diskBytes[2] == 0xBF)
+                {
+                    bomOffset = 3;
+                }
+                string diskText = Encoding.UTF8.GetString(diskBytes, bomOffset, diskBytes.Length - bomOffset);
                 Dictionary<string, object> parsedRoot = ser.Deserialize<Dictionary<string, object>>(diskText);
                 _moneyOk = CheckPlayerMoney(parsedRoot, 10000000);
 
@@ -1076,11 +1084,22 @@ namespace NextJianghu2SaveEditor
             if (root == null || !root.ContainsKey("playerentity")) return false;
             Dictionary<string, object> pe = root["playerentity"] as Dictionary<string, object>;
             if (pe == null) return false;
+            JavaScriptSerializer ser = new JavaScriptSerializer();
+            ser.MaxJsonLength = int.MaxValue;
             foreach (KeyValuePair<string, object> kv in pe)
             {
                 Dictionary<string, object> player = kv.Value as Dictionary<string, object>;
                 if (player == null || !player.ContainsKey("m_valueBase")) continue;
                 Dictionary<string, object> vb = player["m_valueBase"] as Dictionary<string, object>;
+                if (vb == null)
+                {
+                    string vbJson = player["m_valueBase"] as string;
+                    if (!string.IsNullOrEmpty(vbJson))
+                    {
+                        try { vb = ser.Deserialize<Dictionary<string, object>>(vbJson); }
+                        catch { vb = null; }
+                    }
+                }
                 if (vb == null || !vb.ContainsKey("68")) continue;
                 int val = Convert.ToInt32(vb["68"], System.Globalization.CultureInfo.InvariantCulture);
                 if (val == expected) return true;

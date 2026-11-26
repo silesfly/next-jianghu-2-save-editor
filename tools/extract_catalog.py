@@ -237,7 +237,11 @@ def extract_spellprotype(tables, text_map):
             desc = ""
         if not name or name.startswith("무공 ") or "테스트" in name or "공용 효과" in name or "공용효과" in name:
             continue
-        out.append({"id": sid, "name": name, "desc": truncate(desc, 90)})
+        try:
+            spell_type = int(row[8]) if len(row) > 8 and row[8].strip() else 0
+        except ValueError:
+            spell_type = 0
+        out.append({"id": sid, "spellType": spell_type, "name": name, "desc": truncate(desc, 90)})
     return out
 
 
@@ -273,7 +277,11 @@ def extract_stunt_proto(tables, text_map):
         desc = resolve(text_map, row[3], sid, "기예")
         if desc.startswith("기예 "):
             desc = ""
-        out.append({"id": sid, "name": name, "desc": truncate(desc, 90)})
+        try:
+            stunt_type = int(row[5]) if len(row) > 5 and row[5].strip() else 0
+        except ValueError:
+            stunt_type = 0
+        out.append({"id": sid, "stuntType": stunt_type, "name": name, "desc": truncate(desc, 90)})
     return out
 
 
@@ -287,11 +295,19 @@ def extract_jingmai_node(tables, text_map):
             node_id = int(row[4])
         except ValueError:
             continue
+        try:
+            jm_type = int(row[1]) if row[1].strip() else 1
+        except ValueError:
+            jm_type = 1
+        try:
+            jm_group = int(row[6]) if row[6].strip() else 0
+        except ValueError:
+            jm_group = 0
         name = resolve(text_map, row[14], nid, "경맥")
         desc = resolve(text_map, row[15], nid, "경맥")
         if desc.startswith("경맥 "):
             desc = ""
-        out.append({"id": nid, "nodeId": node_id, "name": name, "desc": truncate(desc, 90)})
+        out.append({"id": nid, "nodeId": node_id, "type": jm_type, "group": jm_group, "name": name, "desc": truncate(desc, 90)})
     return out
 
 
@@ -326,7 +342,15 @@ def extract_qinggong_node(tables, text_map):
         desc = resolve(text_map, row[7], nid, "경공")
         if desc.startswith("경공 "):
             desc = ""
-        out.append({"id": nid, "name": name, "desc": truncate(desc, 90)})
+        try:
+            group_id = int(row[3]) if row[3].strip() else (nid // 10)
+        except ValueError:
+            group_id = nid // 10
+        try:
+            level = int(row[4]) if row[4].strip() else 1
+        except ValueError:
+            level = 1
+        out.append({"id": nid, "groupId": group_id, "level": level, "name": name, "desc": truncate(desc, 90)})
     return out
 
 
