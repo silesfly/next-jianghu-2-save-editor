@@ -68,9 +68,10 @@ PRESET_DESCRIPTIONS = {
 }
 
 HTML_CANDIDATES = (
-    Path("dist") / "NextJianghu2SaveEditor-v1.0.1.html",
+    Path("dist") / "NextJianghu2SaveEditor-v1.0.2.html",
     Path("src") / "editor-page.html",
 )
+SUB_SLOT_BAG_BEGIN = 12
 
 FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 MAX_REQUEST_BODY = 64 * 1024 * 1024
@@ -512,8 +513,8 @@ def validate_doc(doc: Dict[str, Any]) -> List[str]:
             if jj_key in player:
                 try:
                     level = _int_like(player.get(jj_key), jj_key)
-                    if level < 0 or level > 13:
-                        errors.append(f"{jj_key} outside 0..13")
+                    if level < 0:
+                        errors.append(f"{jj_key} must be non-negative")
                 except ValueError as exc:
                     errors.append(str(exc))
             for list_key in ("m_learntSpell", "mijiIdList", "m_StuntIds", "m_EquipedStuntIds", "talents", "learnedpeifang", "m8", "qgactive", "m_AchievementList"):
@@ -826,6 +827,56 @@ def _set_minimum(player: Dict[str, Any], keys: Iterable[str], minimum: int) -> N
             _set_int_like(vb, key, minimum)
 
 
+def _find_free_bag_slot(content: Dict[str, Any]) -> int:
+    used = set()
+    for k in content.keys():
+        try:
+            idx = int(str(k).strip(), 10)
+            if idx >= SUB_SLOT_BAG_BEGIN:
+                used.add(idx)
+        except ValueError:
+            pass
+    slot = SUB_SLOT_BAG_BEGIN
+    while slot in used:
+        slot += 1
+    return slot
+
+
+def _sync_storage_count_min(storage: Dict[str, Any], min_slot: int) -> None:
+    max_slot = min_slot
+    content = storage.get("content")
+    if isinstance(content, dict):
+        for k in content.keys():
+            try:
+                idx = int(str(k).strip(), 10)
+                if idx > max_slot:
+                    max_slot = idx
+            except ValueError:
+                pass
+    try:
+        cur = _int_like(storage.get("count", 0), "itemStorage.count")
+    except ValueError:
+        cur = 0
+    if cur < max_slot + 1:
+        storage["count"] = max_slot + 1
+
+
+def _collect_max_item_uid(content: Dict[str, Any]) -> int:
+    max_uid = 0
+    for k, v in content.items():
+        if isinstance(v, dict) and "0" in v:
+            try:
+                max_uid = max(max_uid, _int_like(v.get("0"), "item uid"))
+                continue
+            except ValueError:
+                pass
+        try:
+            max_uid = max(max_uid, _int_like(k, "item uid"))
+        except ValueError:
+            pass
+    return max_uid
+
+
 def _starter_kit(doc: Dict[str, Any], player: Dict[str, Any]) -> None:
     storage = player.get("itemStorage")
     if not isinstance(storage, dict):
@@ -840,26 +891,16 @@ def _starter_kit(doc: Dict[str, Any], player: Dict[str, Any]) -> None:
         generator = _int_like(doc.get("m_ItemIdGenerator", 0), "m_ItemIdGenerator")
     except ValueError:
         generator = 0
-    if not content:
-        max_uid = 0
-    else:
-        max_uid = 0
-        for k, v in content.items():
-            try:
-                max_uid = max(max_uid, _int_like(k, "item uid"))
-            except ValueError:
-                if isinstance(v, dict):
-                    try:
-                        max_uid = max(max_uid, _int_like(v.get("0", 0), "item uid"))
-                    except ValueError:
-                        pass
-    generator = max(generator, max_uid)
+    generator = max(generator, _collect_max_item_uid(content))
 
     additions = ((1001, 10), (1002, 10), (1003, 10), (1004, 10), (1005, 10))
+    last_slot = SUB_SLOT_BAG_BEGIN - 1
     for proto, count in additions:
         generator += 1
         uid = generator
-        content[str(uid)] = {
+        slot = _find_free_bag_slot(content)
+        last_slot = max(last_slot, slot)
+        content[str(slot)] = {
             "0": uid,
             "1": proto,
             "2": count,
@@ -867,6 +908,7 @@ def _starter_kit(doc: Dict[str, Any], player: Dict[str, Any]) -> None:
             "9": 10,
             "10": 1,
         }
+    _sync_storage_count_min(storage, last_slot)
     doc["m_ItemIdGenerator"] = generator
 
 
@@ -945,13 +987,8 @@ def apply_presets(
             generator = _int_like(doc.get("m_ItemIdGenerator", 0), "m_ItemIdGenerator")
         except ValueError:
             generator = 0
-        max_uid = 0
-        for k in content.keys():
-            try:
-                max_uid = max(max_uid, _int_like(k, "item uid"))
-            except ValueError:
-                pass
-        generator = max(generator, max_uid)
+        generator = max(generator, _collect_max_item_uid(content))
+        last_slot = SUB_SLOT_BAG_BEGIN - 1
         for item in add_items:
             if ":" not in item:
                 raise ValueError(f"item must be PROTO:COUNT: {item}")
@@ -965,7 +1002,9 @@ def apply_presets(
                 raise ValueError(f"item proto and count must be positive: {item}")
             generator += 1
             uid = generator
-            content[str(uid)] = {
+            slot = _find_free_bag_slot(content)
+            last_slot = max(last_slot, slot)
+            content[str(slot)] = {
                 "0": uid,
                 "1": proto,
                 "2": count,
@@ -973,6 +1012,7 @@ def apply_presets(
                 "9": 1,
                 "10": 1,
             }
+        _sync_storage_count_min(storage, last_slot)
         doc["m_ItemIdGenerator"] = generator
 
     return {"playerGuid": _guid, "applied": applied}
@@ -997,7 +1037,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     now = _utc_now_iso()
     player: Dict[str, Any] = {
         "m_valueBase": {str(i): 100 + i for i in range(0, 95)},
-        "itemStorage": {"content": {}},
+        "itemStorage": {"count": 120, "content": {}},
         "name": "DemoHero",
         "jingjieGangLevel": 3,
         "m_GameTimeYear": 1,
@@ -1021,15 +1061,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
     player["m_valueBase"]["94"] = 2
 
     content = player["itemStorage"]["content"]
-    for uid, proto, count in ((1, 10001, 10), (2, 10002, 5), (3, 10003, 3)):
-        content[str(uid)] = {
-            "0": uid,
-            "1": proto,
-            "2": count,
-            "7": 0,
-            "9": 1,
-            "10": 1,
-        }
+    content["12"] = {"0": 1, "1": 10001, "2": 10, "7": 0, "9": 1, "10": 1}
+    content["13"] = {"0": 2, "1": 10002, "7": 0, "9": 1, "10": 1}
+    content["14"] = {"0": 3, "1": 10003, "2": 3, "7": 0, "9": 1, "10": 1}
 
     doc = {
         "version": "77",

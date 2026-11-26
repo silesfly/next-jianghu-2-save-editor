@@ -19,8 +19,11 @@
 
   var ATTR_COUNT = 95;
   var INT_MIN = 0;
+  var INT32_MIN = -2147483648;
   var INT_MAX = 2147483647;
+  var SUB_SLOT_BAG_BEGIN = 12;
   var ZHENGXIE_INDEX = 71;
+  var DAODE_INDEX = 67;
   var ZHENGXIE_MIN = -999999;
   var ZHENGXIE_MAX = 999999;
   var JINGJIE_MIN = 0;
@@ -259,10 +262,19 @@
     return out;
   }
 
-  function itemContentOf(entity) {
+  function readItemContent(entity) {
+    if (!isObj(entity) || !isObj(entity.itemStorage)) { return null; }
+    return isObj(entity.itemStorage.content) ? entity.itemStorage.content : null;
+  }
+
+  function ensureItemContent(entity) {
     if (!isObj(entity)) { return null; }
     var st = ensureObj(entity, 'itemStorage');
     return ensureObj(st, 'content');
+  }
+
+  function itemContentOf(entity) {
+    return ensureItemContent(entity);
   }
 
   function attrBaseOf(entity) {
@@ -270,17 +282,43 @@
     return ensureObj(entity, 'm_valueBase');
   }
 
+  function parseSlotKey(key) {
+    if (typeof key !== 'string' || !/^\d+$/.test(key)) { return -1; }
+    var n = parseInt(key, 10);
+    return isFinite(n) && n >= 0 ? n : -1;
+  }
+
+  function maxSlotInContent(content) {
+    var maxSlot = -1;
+    if (!isObj(content)) { return maxSlot; }
+    var keys = Object.keys(content);
+    for (var i = 0; i < keys.length; i++) {
+      var s = parseSlotKey(keys[i]);
+      if (s > maxSlot) { maxSlot = s; }
+    }
+    return maxSlot;
+  }
+
+  function findFreeBagSlot(content) {
+    var slot = SUB_SLOT_BAG_BEGIN;
+    if (!isObj(content)) { return slot; }
+    while (Object.prototype.hasOwnProperty.call(content, String(slot)) && content[String(slot)] != null) {
+      slot += 1;
+    }
+    return slot;
+  }
+
   function collectMaxUid(session) {
     var maxUid = 0;
     var entities = listEntities(session);
     for (var i = 0; i < entities.length; i++) {
-      var content = itemContentOf(entities[i]);
+      var content = readItemContent(entities[i]);
       if (!content) { continue; }
-      var uids = Object.keys(content);
-      for (var j = 0; j < uids.length; j++) {
-        var row = content[uids[j]];
-        var c = toInt(uids[j], NaN);
-        if (isNaN(c) && isObj(row)) { c = toInt(row[UID_KEY], NaN); }
+      var keys = Object.keys(content);
+      for (var j = 0; j < keys.length; j++) {
+        var row = content[keys[j]];
+        var c = isObj(row) ? toInt(row[UID_KEY], NaN) : NaN;
+        if (isNaN(c)) { c = toInt(keys[j], NaN); }
         if (!isNaN(c) && c > maxUid) { maxUid = c; }
       }
     }
@@ -288,9 +326,14 @@
   }
 
   function syncEntityStorage(entity) {
-    var content = itemContentOf(entity);
-    if (!content) { return; }
-    entity.itemStorage.count = Object.keys(content).length;
+    if (!isObj(entity) || !isObj(entity.itemStorage)) { return; }
+    var content = readItemContent(entity);
+    var maxSlot = maxSlotInContent(content);
+    var existing = toInt(entity.itemStorage.count, NaN);
+    var minNeeded = maxSlot >= 0 ? (maxSlot + 1) : 0;
+    if (isNaN(existing) || existing < minNeeded) {
+      entity.itemStorage.count = Math.max(minNeeded, isNaN(existing) ? 0 : existing);
+    }
   }
 
   function syncDerived(session) {
@@ -391,7 +434,7 @@
     }
     var rootObj = session.root;
     var player = session.player;
-    var base = attrBaseOf(player);
+    var base = isObj(player) && isObj(player.m_valueBase) ? player.m_valueBase : null;
     if (!base) {
       errors.push('주인공 속성 표(m_valueBase)가 없습니다.');
     } else {
@@ -400,57 +443,79 @@
         var k = bkeys[bi];
         var idx = toInt(k, -1);
         var raw = base[k];
-        if (typeof raw !== 'number' || raw !== Math.trunc(raw)) {
-          errors.push('속성 ' + k + ' (' + attrLabel(idx) + ') 는 정수여야 합니다.');
+        var numRaw = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw !== '' ? Number(raw) : NaN);
+        if (!isFinite(numRaw) || isNaN(numRaw)) {
+          errors.push('속성 ' + k + ' (' + attrLabel(idx) + ') 값이 숫자가 아닙니다.');
           continue;
         }
-        if (idx === ZHENGXIE_INDEX) {
-          if (raw < ZHENGXIE_MIN || raw > ZHENGXIE_MAX) {
-            errors.push('정사 값은 ' + ZHENGXIE_MIN + ' ~ ' + ZHENGXIE_MAX + ' 범위여야 합니다.');
-          }
-        } else if (raw < INT_MIN || raw > INT_MAX) {
+        if (numRaw !== Math.trunc(numRaw)) {
+          warnings.push('속성 ' + k + ' (' + attrLabel(idx) + ') 값이 정수가 아닙니다: ' + numRaw);
+          continue;
+        }
+        if (numRaw < INT32_MIN || numRaw > INT_MAX) {
           errors.push('속성 ' + k + ' (' + attrLabel(idx) + ') 값이 정수 범위를 벗어났습니다.');
+        } else if (idx === ZHENGXIE_INDEX && (numRaw < ZHENGXIE_MIN || numRaw > ZHENGXIE_MAX)) {
+          warnings.push('정사 값이 권장 범위(' + ZHENGXIE_MIN + ' ~ ' + ZHENGXIE_MAX + ')를 벗어났습니다.');
+        } else if (numRaw < 0 && idx !== ZHENGXIE_INDEX && idx !== DAODE_INDEX && idx < 200) {
+          warnings.push('속성 ' + k + ' (' + attrLabel(idx) + ') 값이 음수입니다: ' + numRaw);
         }
       }
     }
 
     var jl = readJingjieLevel(session);
     if (jl < JINGJIE_MIN || jl > JINGJIE_MAX) {
-      errors.push('경계 단계는 ' + JINGJIE_MIN + ' ~ ' + JINGJIE_MAX + ' 범위여야 합니다.');
+      warnings.push('경계 단계가 기본 범위(' + JINGJIE_MIN + ' ~ ' + JINGJIE_MAX + ')를 벗어났습니다: ' + jl);
     }
 
     if (rootObj.m_GameDiff !== undefined) {
       var gd = toInt(rootObj.m_GameDiff, NaN);
-      if (isNaN(gd) || gd < GAME_DIFF_MIN || gd > GAME_DIFF_MAX) {
-        errors.push('게임 난이도는 ' + GAME_DIFF_MIN + ' ~ ' + GAME_DIFF_MAX + ' 범위여야 합니다.');
+      if (isNaN(gd)) {
+        errors.push('게임 난이도 값이 정수가 아닙니다.');
+      } else if (gd < 0 || gd > GAME_DIFF_MAX) {
+        warnings.push('게임 난이도가 기본 범위(0 ~ ' + GAME_DIFF_MAX + ')를 벗어났습니다: ' + gd);
       }
     }
 
     var entities = listEntities(session);
     for (var e = 0; e < entities.length; e++) {
       var entity = entities[e];
-      var content = itemContentOf(entity);
+      if (!isObj(entity) || !isObj(entity.itemStorage)) { continue; }
+      var content = readItemContent(entity);
       if (!content) { continue; }
-      var uids = Object.keys(content);
-      for (var u = 0; u < uids.length; u++) {
-        var uid = uids[u];
-        var row = content[uid];
+      var slotKeys = Object.keys(content);
+      var maxSlot = -1;
+      for (var u = 0; u < slotKeys.length; u++) {
+        var slotKey = slotKeys[u];
+        var slotIdx = parseSlotKey(slotKey);
+        if (slotIdx > maxSlot) { maxSlot = slotIdx; }
+        var row = content[slotKey];
         if (!isObj(row)) {
-          errors.push('아이템 ' + uid + ' 구조가 올바르지 않습니다.');
+          errors.push('아이템 슬롯 ' + slotKey + ' 구조가 올바르지 않습니다.');
           continue;
         }
-        var n = toInt(row[COUNT_KEY], NaN);
-        if (isNaN(n) || n < 1) {
-          errors.push('아이템 ' + uid + ' 수량은 1 이상이어야 합니다.');
+        // 게임 Item.Save()는 수량(nOverlap)이 1일 때 키 '2'를 생략한다.
+        var rawCount = row[COUNT_KEY];
+        if (rawCount !== undefined && rawCount !== null && rawCount !== '') {
+          var n = toInt(rawCount, NaN);
+          if (isNaN(n) || n < 0) {
+            errors.push('아이템 슬롯 ' + slotKey + ' 수량이 올바르지 않습니다.');
+          } else if (n === 0) {
+            warnings.push('아이템 슬롯 ' + slotKey + ' 수량이 0입니다.');
+          }
         }
-        var proto = toInt(row[PROTO_KEY], NaN);
-        if (isNaN(proto) || proto < 0) {
-          errors.push('아이템 ' + uid + ' 원형 번호가 올바르지 않습니다.');
+        var rawProto = row[PROTO_KEY];
+        if (rawProto === undefined || rawProto === null || rawProto === '') {
+          warnings.push('아이템 슬롯 ' + slotKey + ' 원형 번호가 생략되었습니다.');
+        } else {
+          var proto = toInt(rawProto, NaN);
+          if (isNaN(proto) || proto < 0) {
+            errors.push('아이템 슬롯 ' + slotKey + ' 원형 번호가 올바르지 않습니다.');
+          }
         }
       }
-      var declared = toInt(entity.itemStorage && entity.itemStorage.count, NaN);
-      if (!isNaN(declared) && declared !== uids.length) {
-        warnings.push('아이템 개수(' + declared + ')가 실제 항목 수(' + uids.length + ')와 다릅니다.');
+      var declared = toInt(entity.itemStorage.count, NaN);
+      if (!isNaN(declared) && maxSlot >= 0 && declared < maxSlot + 1) {
+        warnings.push('가방 슬롯 용량(' + declared + ')이 최대 슬롯 번호(' + maxSlot + ')보다 작습니다.');
       }
     }
 
@@ -563,8 +628,9 @@
     var target = o.entityId ? getEntity(session, o.entityId) : session.player;
     if (!target) { return failMsg('대상 엔티티를 찾지 못했습니다: ' + o.entityId); }
 
-    var content = itemContentOf(target);
+    var content = ensureItemContent(target);
     var uid = nextItemUid(session);
+    var slot = findFreeBagSlot(content);
     var row = {};
     row[UID_KEY] = uid;
     row[PROTO_KEY] = proto;
@@ -572,11 +638,11 @@
     row[INTENSIFY_KEY] = intensify;
     row[GRADE_KEY] = grade;
     row[LEVEL_KEY] = level;
-    content[String(uid)] = row;
+    content[String(slot)] = row;
 
     session.dirty = true;
     syncDerived(session);
-    return okMsg({ uid: uid });
+    return okMsg({ uid: uid, slot: slot });
   }
 
   var ITEM_PATCH_KEYS = {
@@ -587,17 +653,51 @@
     grade: GRADE_KEY, quality: GRADE_KEY, level: LEVEL_KEY
   };
 
-  function updateItem(session, uid, patch) {
+  function findItemEntry(session, idOrSlot, opts) {
+    var o = isObj(opts) ? opts : {};
+    var candidates = [];
+    if (o.entityId !== undefined && o.entityId !== null && o.entityId !== '') {
+      var target = getEntity(session, o.entityId);
+      if (target) { candidates.push(target); }
+    } else {
+      candidates = listEntities(session);
+    }
+
+    var slotOpt = (o.slot !== undefined && o.slot !== null && o.slot !== '') ? String(o.slot) : null;
+    if (slotOpt !== null) {
+      for (var s = 0; s < candidates.length; s++) {
+        var sc = readItemContent(candidates[s]);
+        if (sc && isObj(sc[slotOpt])) {
+          return { entity: candidates[s], content: sc, slotKey: slotOpt, row: sc[slotOpt] };
+        }
+      }
+    }
+
+    var key = String(idOrSlot);
+    for (var i = 0; i < candidates.length; i++) {
+      var content = readItemContent(candidates[i]);
+      if (!content) { continue; }
+      var ckeys = Object.keys(content);
+      for (var j = 0; j < ckeys.length; j++) {
+        var r = content[ckeys[j]];
+        if (isObj(r) && r[UID_KEY] !== undefined && r[UID_KEY] !== null && String(r[UID_KEY]) === key) {
+          return { entity: candidates[i], content: content, slotKey: ckeys[j], row: r };
+        }
+      }
+      if (isObj(content[key])) {
+        return { entity: candidates[i], content: content, slotKey: key, row: content[key] };
+      }
+    }
+    return null;
+  }
+
+  function updateItem(session, uid, patch, opts) {
     if (!session || !session.root) { return failMsg('세션이 없습니다.'); }
     if (!isObj(patch)) { return failMsg('변경할 값을 지정하세요.'); }
     var key = String(uid);
-    var entities = listEntities(session);
-    var row = null;
-    for (var i = 0; i < entities.length; i++) {
-      var content = itemContentOf(entities[i]);
-      if (content && isObj(content[key])) { row = content[key]; break; }
-    }
-    if (!row) { return failMsg('아이템을 찾지 못했습니다: ' + key); }
+    var found = findItemEntry(session, key, opts);
+    if (!found) { return failMsg('아이템을 찾지 못했습니다: ' + key); }
+    var row = found.row;
 
     var keys = Object.keys(patch);
     for (var k = 0; k < keys.length; k++) {
@@ -612,26 +712,18 @@
     }
     session.dirty = true;
     syncDerived(session);
-    return okMsg();
+    return okMsg({ slot: found.slotKey });
   }
 
-  function removeItem(session, uid) {
+  function removeItem(session, uid, opts) {
     if (!session || !session.root) { return failMsg('세션이 없습니다.'); }
     var key = String(uid);
-    var entities = listEntities(session);
-    var removed = false;
-    for (var i = 0; i < entities.length; i++) {
-      var content = itemContentOf(entities[i]);
-      if (content && Object.prototype.hasOwnProperty.call(content, key)) {
-        delete content[key];
-        removed = true;
-        break;
-      }
-    }
-    if (!removed) { return failMsg('아이템을 찾지 못했습니다: ' + key); }
+    var found = findItemEntry(session, key, opts);
+    if (!found) { return failMsg('아이템을 찾지 못했습니다: ' + key); }
+    delete found.content[found.slotKey];
     session.dirty = true;
     syncDerived(session);
-    return okMsg();
+    return okMsg({ slot: found.slotKey });
   }
 
   function toggleIdInList(session, fieldName, id, add) {
@@ -812,6 +904,12 @@
     return changes;
   }
 
+  function summarizeErrors(errors) {
+    if (!isArr(errors) || !errors.length) { return ''; }
+    if (errors.length <= 5) { return errors.join(' / '); }
+    return errors.slice(0, 5).join(' / ') + ' 외 ' + (errors.length - 5) + '건';
+  }
+
   function exportSave(session, opts) {
     if (!session || !session.root) { throw new Error('세션이 없습니다.'); }
     syncDerived(session);
@@ -819,7 +917,7 @@
     if (o.validate !== false) {
       var report = validate(session);
       if (!report.ok) {
-        var err = new Error('세이브 검증 실패: ' + report.errors.join(' / '));
+        var err = new Error('세이브 검증 실패: ' + summarizeErrors(report.errors));
         err.validation = report;
         throw err;
       }
@@ -836,13 +934,15 @@
     if (!session || !session.root) { return null; }
     var rootObj = session.root;
     var player = session.player;
-    var count = 0;
+    var playerContent = readItemContent(player);
+    var playerCount = playerContent ? Object.keys(playerContent).length : 0;
+    var totalCount = 0;
     var entities = listEntities(session);
     for (var i = 0; i < entities.length; i++) {
-      var content = itemContentOf(entities[i]);
-      if (content) { count += Object.keys(content).length; }
+      var content = readItemContent(entities[i]);
+      if (content) { totalCount += Object.keys(content).length; }
     }
-    var vbase = attrBaseOf(player) || {};
+    var vbase = (isObj(player) && isObj(player.m_valueBase)) ? player.m_valueBase : {};
     var v = validate(session);
     var jingjie = readJingjieLevel(session);
     var diff = toInt(rootObj.m_GameDiff, 1);
@@ -865,7 +965,8 @@
         month: toInt(player.m_GameTimeMonth, 1),
         day: toInt(player.m_GameTimeDay, 1)
       },
-      itemCount: count,
+      itemCount: playerCount,
+      totalItemCount: totalCount,
       itemIdGenerator: toInt(rootObj.m_ItemIdGenerator, 0),
       companionCount: isObj(rootObj.Entitys) ? Object.keys(rootObj.Entitys).length : 0,
       core: {
@@ -889,10 +990,12 @@
   }
 
   return {
-    VERSION: '1.0.0',
+    VERSION: '1.0.2',
     ATTR_COUNT: ATTR_COUNT,
     INT_MIN: INT_MIN,
+    INT32_MIN: INT32_MIN,
     INT_MAX: INT_MAX,
+    SUB_SLOT_BAG_BEGIN: SUB_SLOT_BAG_BEGIN,
     ZHENGXIE_INDEX: ZHENGXIE_INDEX,
     ZHENGXIE_MIN: ZHENGXIE_MIN,
     ZHENGXIE_MAX: ZHENGXIE_MAX,

@@ -153,6 +153,22 @@ class TestCliWorkflow(unittest.TestCase):
         with self.assertRaises(E.ShaMismatchError):
             E.save_with_backup(save_p, orig_bytes, expected_sha256="0" * 64)
 
+    def test_starter_kit_and_add_item_use_bag_slots_and_preserve_count(self):
+        save_p, _ = self._seed_demo()
+        p_edit = run_cli("edit", str(save_p), "--preset", "starter_kit", "--add-item", "1006:1")
+        self.assertEqual(p_edit.returncode, 0, p_edit.stderr)
+        doc = json.loads(save_p.read_text(encoding="utf-8"))
+        player = next(iter(doc["playerentity"].values()))
+        storage = player["itemStorage"]
+        content = storage["content"]
+        slot_nums = [int(k) for k in content.keys()]
+        self.assertTrue(all(s >= E.SUB_SLOT_BAG_BEGIN for s in slot_nums), slot_nums)
+        self.assertGreaterEqual(storage["count"], max(slot_nums) + 1)
+        self.assertGreaterEqual(storage["count"], 120)
+        # Slot 13 in demo omits key "2" (real qty-1 format) and still validates
+        self.assertNotIn("2", content["13"])
+        self.assertEqual(E.validate_doc(doc), [])
+
 
 class TestLoopbackServer(unittest.TestCase):
     def setUp(self):

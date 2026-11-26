@@ -76,10 +76,15 @@
   function showToast(message, kind) {
     const host = $('toast-host');
     if (!host) return;
+    let text = String(message == null ? '' : message);
+    if (text.length > 240) {
+      text = text.slice(0, 237) + '... (변경 내역 탭 확인)';
+    }
     const cls = 'toast' + (kind === 'ok' || kind === 'warn' || kind === 'error' ? ' ' + kind : '');
-    const node = el('div', { className: cls, text: message });
+    const node = el('div', { className: cls, text });
     host.appendChild(node);
-    setTimeout(() => { try { host.removeChild(node); } catch (_) {} }, 3200);
+    const delay = kind === 'error' ? 4800 : 3200;
+    setTimeout(() => { try { host.removeChild(node); } catch (_) {} }, delay);
   }
 
   function setStatus(text, kind) {
@@ -900,10 +905,15 @@
       if (!row || typeof row !== 'object') continue;
       const uid = row['0'] != null ? row['0'] : key;
       const proto = row['1'] != null ? row['1'] : '';
+      const slotNum = Number(key);
+      const slotTag = Number.isInteger(slotNum)
+        ? (slotNum < (CORE.SUB_SLOT_BAG_BEGIN || 12) ? ('장착 ' + slotNum) : ('가방 ' + slotNum))
+        : String(key);
       const name = lookupNameSafe('item', proto) || ('아이템 #' + proto);
-      if (search && !name.toLowerCase().includes(search) && !String(uid).includes(search) && !String(proto).includes(search)) continue;
+      if (search && !name.toLowerCase().includes(search) && !String(uid).includes(search) && !String(proto).includes(search) && !slotTag.includes(search)) continue;
       shown++;
 
+      const itemOpts = { slot: key, entityId: state.session.playerKey };
       const mkNum = (val, minVal, fieldName) => el('input', {
         type: 'number',
         attrs: { min: String(minVal), 'aria-label': name + ' ' + fieldName },
@@ -914,7 +924,7 @@
             if (!Number.isFinite(v) || v < minVal) return;
             const patch = {};
             patch[fieldName] = v;
-            const r = CORE.updateItem(state.session, uid, patch);
+            const r = CORE.updateItem(state.session, uid, patch, itemOpts);
             if (!r || !r.ok) showToast('수정 실패: ' + ((r && r.error) || ''), 'error');
             else refreshDirtyBadge();
           },
@@ -922,7 +932,7 @@
       });
 
       tbody.appendChild(el('tr', {}, [
-        el('td', { className: 'id-cell', text: uid + ' / #' + proto }),
+        el('td', { className: 'id-cell', text: slotTag + ' · #' + proto, title: '슬롯 ' + key + ' / UID ' + uid + ' / 원형 #' + proto }),
         el('td', { className: 'name-cell', text: name }),
         el('td', { className: 'num' }, [mkNum(row['2'] != null ? row['2'] : 1, 1, 'count')]),
         el('td', { className: 'num' }, [mkNum(row['9'] != null ? row['9'] : 10, 1, 'grade')]),
@@ -934,7 +944,7 @@
           text: '삭제',
           on: {
             click: () => {
-              const r = CORE.removeItem(state.session, uid);
+              const r = CORE.removeItem(state.session, uid, itemOpts);
               if (!r || !r.ok) showToast('삭제 실패', 'error');
               else { renderInventory(); refreshDirtyBadge(); }
             },
@@ -1333,7 +1343,7 @@
     if (exp) exp.addEventListener('click', () => {
       try {
         const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
-        downloadBytes('NextJianghu2SaveEditor-v1.0.1.html', new TextEncoder().encode(html), 'text/html;charset=utf-8');
+        downloadBytes('NextJianghu2SaveEditor-v1.0.2.html', new TextEncoder().encode(html), 'text/html;charset=utf-8');
         showToast('현재 에디터 HTML을 내보냈습니다.', 'ok');
       } catch (err) {
         showToast('HTML 내보내기 실패: ' + (err && err.message ? err.message : String(err)), 'error');

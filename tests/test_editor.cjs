@@ -124,26 +124,74 @@ test('setAttribute enforces bounds and permits negative values only for attr 71'
 });
 
 // 5. addItem / updateItem / removeItem
-test('addItem / updateItem / removeItem maintain UID generator and storage count', () => {
+test('addItem / updateItem / removeItem allocate bag slot >= 12 and keep storage capacity', () => {
   const session = core.createSession(demoJsonStr, demo.headerBytes);
   const beforeGen = session.root.m_ItemIdGenerator;
-  const beforeCount = Object.keys(session.player.itemStorage.content).length;
+  const beforeCapacity = session.player.itemStorage.count;
+  const beforeLen = Object.keys(session.player.itemStorage.content).length;
 
   const added = core.addItem(session, 1001, 5, { grade: 12, intensify: 2 });
   assert.strictEqual(added.ok, true);
   assert.ok(added.uid > beforeGen);
+  assert.ok(added.slot >= core.SUB_SLOT_BAG_BEGIN);
   assert.strictEqual(session.root.m_ItemIdGenerator, added.uid);
-  assert.strictEqual(session.player.itemStorage.count, beforeCount + 1);
+  assert.strictEqual(session.player.itemStorage.count, Math.max(beforeCapacity, added.slot + 1));
+  assert.strictEqual(Object.keys(session.player.itemStorage.content).length, beforeLen + 1);
+  assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['0'], added.uid);
 
   const upd = core.updateItem(session, added.uid, { count: 9, intensify: 7 });
   assert.strictEqual(upd.ok, true);
-  assert.strictEqual(session.player.itemStorage.content[String(added.uid)]['2'], 9);
-  assert.strictEqual(session.player.itemStorage.content[String(added.uid)]['7'], 7);
+  assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['2'], 9);
+  assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['7'], 7);
+
+  const updBySlot = core.updateItem(session, added.uid, { count: 1 }, { slot: String(added.slot) });
+  assert.strictEqual(updBySlot.ok, true);
+  assert.strictEqual(session.player.itemStorage.content[String(added.slot)]['2'], 1);
 
   const rem = core.removeItem(session, added.uid);
   assert.strictEqual(rem.ok, true);
-  assert.strictEqual(session.player.itemStorage.count, beforeCount);
-  assert.strictEqual(session.player.itemStorage.content[String(added.uid)], undefined);
+  assert.strictEqual(session.player.itemStorage.count, Math.max(beforeCapacity, added.slot + 1));
+  assert.strictEqual(session.player.itemStorage.content[String(added.slot)], undefined);
+  assert.strictEqual(Object.keys(session.player.itemStorage.content).length, beforeLen);
+});
+
+// 5b. Real-save regression: omitted key '2' (qty 1), slot capacity preservation, NPC without itemStorage, signed/extended attrs
+test('real-save shape with omitted qty key 2, capacity 200, missing NPC storage, and signed attrs exports cleanly unmodified', () => {
+  const realLike = JSON.parse(demoJsonStr);
+  realLike.playerentity['1'].itemStorage = {
+    count: 200,
+    content: {
+      '0': { '0': 500001, '1': 1001, '9': 10, '10': 1 },
+      '12': { '0': 500002, '1': 1002, '9': 11, '10': 1 },
+      '14': { '0': 500003, '1': 1003, '9': 12, '10': 1 },
+    },
+  };
+  realLike.playerentity['1'].m_valueBase['67'] = -15;
+  realLike.playerentity['1'].m_valueBase['1020'] = -30;
+  realLike.Entitys['2'].itemStorage = {
+    count: 48,
+    content: {
+      '0': { '0': 600001, '1': 1001 },
+      '1': { '0': 600002, '1': 1002 },
+    },
+  };
+  realLike.Entitys['3'] = { guid: 3, type: 2, isActive: false, m_valueBase: { '0': 500 } };
+
+  const session = core.createSession(JSON.stringify(realLike), demo.headerBytes);
+  const rep = core.validate(session);
+  assert.strictEqual(rep.ok, true, 'validate errors: ' + rep.errors.join('; '));
+  assert.strictEqual(rep.errors.length, 0);
+  assert.strictEqual(session.player.itemStorage.count, 200);
+  assert.strictEqual(session.root.Entitys['2'].itemStorage.count, 48);
+  assert.strictEqual('itemStorage' in session.root.Entitys['3'], false);
+
+  const exp = core.exportSave(session);
+  const roundTripped = JSON.parse(Buffer.from(exp.jsonBytes).toString('utf8'));
+  assert.strictEqual(roundTripped.playerentity['1'].itemStorage.count, 200);
+  assert.strictEqual(roundTripped.playerentity['1'].m_valueBase['67'], -15);
+  assert.strictEqual(roundTripped.playerentity['1'].m_valueBase['1020'], -30);
+  assert.strictEqual('2' in roundTripped.playerentity['1'].itemStorage.content['12'], false);
+  assert.strictEqual('itemStorage' in roundTripped.Entitys['3'], false);
 });
 
 // 6. toggleIdInList across tracked lists

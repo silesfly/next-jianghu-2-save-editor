@@ -1,18 +1,18 @@
-# 하일참강호2 세이브 에디터 v1.0.1 (`NextJianghu2SaveEditor`)
+# 하일참강호2 세이브 에디터 v1.0.2 (`NextJianghu2SaveEditor`)
 
 백옥경(inmotiongame) 스튜디오의 **하일참강호 2(`Next Jianghu II`, Steam AppID `1606180`, 스팀 빌드 `26639277` · PC 제165차 호환)** 전용 오프라인 세이브 편집기입니다.
 
 ## 주요 실행 방식 (3종 표면)
 
-- **Windows x64 단독 실행 파일**: `NextJianghu2SaveEditor-v1.0.1.exe` (`.NET Framework 4.8` + `WebView2` 내장, `%USERPROFILE%\AppData\LocalLow\inmotiongame\...\Save2` 및 Steam 설치 경로 자동 탐색)
-- **단독 오프라인 HTML**: `dist/NextJianghu2SaveEditor-v1.0.1.html` (CSP `default-src 'none'; connect-src 'none'` 적용, 외부 네트워크 요청 0건, 밝은/어두운 테마 전환)
+- **Windows x64 단독 실행 파일**: `NextJianghu2SaveEditor-v1.0.2.exe` (`.NET Framework 4.8` + `WebView2` 내장, `%USERPROFILE%\AppData\LocalLow\inmotiongame\...\Save2` 및 Steam 설치 경로 자동 탐색)
+- **단독 오프라인 HTML**: `dist/NextJianghu2SaveEditor-v1.0.2.html` (CSP `default-src 'none'; connect-src 'none'` 적용, 외부 네트워크 요청 0건, 밝은/어두운 테마 전환)
 - **Python 3 CLI 및 로컬 웹 서버**: `nj2_editor.py` (`demo`, `discover`, `inspect`, `validate`, `presets`, `edit`, `serve`)
 
 ## 지원 세이브 형식 및 구조 (REA 검증 기반)
 
 - **세이브 쌍 구조**: 비암호화 UTF-8 JSON 본문(`savefile<N>.json` / `Auto/autosavefile<N>.json`)과 확장자 없는 동반 헤더(`savefile<N>` / `autosavefile<N>`)
 - **동반 헤더 포맷**: `.NET BinaryWriter` 7비트 가변 길이 UTF-8 문자열 10개(`saveFileVersion == 76`) 또는 11개(`>= 77`, `gameType` 포함) 보존 라운드트립
-- **스키마**: `playerentity[<guid>]` 내 `m_valueBase` 95종 속성(`0..94`), `itemStorage.content["<uid>"]` 가방/장비 + `m_ItemIdGenerator`, `jingjieGangLevel`(`0..13`), 무공/비급/특기/천부/비방/경맥(`m8`)/경공(`qgactive`)/업적 및 동료 엔티티(`Entitys`)
+- **스키마**: `playerentity[<guid>]` 내 `m_valueBase` 95종 속성(`0..94`), `itemStorage.content["<slot>"]` 가방/장비(장착 `0..11`, 가방 `12+`, 단일 수량 아이템 키 `'2'` 생략 호환) + `m_ItemIdGenerator`, `jingjieGangLevel`(`0..13`), 무공/비급/특기/천부/비방/경맥(`m8`)/경공(`qgactive`)/업적 및 동료 엔티티(`Entitys`)
 
 ## 편집 기능
 
